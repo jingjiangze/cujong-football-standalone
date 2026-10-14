@@ -115,13 +115,15 @@ test('AI stays idle once the match is finished', () => {
 test('AI makes progress on its own: it fills the field over repeated decision rounds', () => {
   let state = createMatchState({ operators: roster, seed: 23 });
   const profile = getBallProfile(state.ball.type);
-  // 部署阶段费用不增长（初始 30 只够 2 人：10+15+12=37>30），先开战让费用随时间恢复
+  // 部署阶段费用不增长（初始 30 只够 2 人：10+15+12=37>30），先开战让费用随时间恢复。
+  // costIncreaseSeconds=0.85 ⇒ 每秒才涨 1 点；一轮推 1s（20×0.05，引擎单 tick 上限 0.1s 内累计），
+  // 需约 15 轮才能把第三人（cost 12）的费用攒出来。
   state = voteReady(state, 0, true);
   state = voteReady(state, 1, true);
   assert.equal(state.phase, 'battle');
   let guard = 0;
-  while (state.fieldUnits.filter(unit => unit.ownerId === 1).length < 3 && guard++ < 60) {
-    state = tickMatch(state, .05);
+  while (state.fieldUnits.filter(unit => unit.ownerId === 1).length < 3 && guard++ < 40) {
+    for (let step = 0; step < 20; step++) state = tickMatch(state, .05);
     state = applyCommands(state, 1, decideAiTeammateCommands(state, 1, profile));
   }
   const owned = state.fieldUnits.filter(unit => unit.ownerId === 1);
