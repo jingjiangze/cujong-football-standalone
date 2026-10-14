@@ -13,7 +13,7 @@ const stateUi = {
   localOwner:0, online:false, host:false, socket:null, roomId:null,
   lastBroadcast:0, lastDrawKey:'', iconUrls:{}, iconSheetText:null,
   simAccumulator:0, previousFrame:performance.now(), running:false, loading:false,
-  chosenRoster:new Set(), lastError:null, lastEvents:[],
+  chosenRoster:new Set(), lastError:null, lastEvents:[], resumeOnSnapshot:false, clientToken:null,
 };
 
 const profileNames = {
@@ -332,7 +332,7 @@ function applyCommand(ownerId,action,payload={}) {
     case 'withdraw': result=withdrawOperator(stateUi.match,payload.unitId);stateUi.match=result.state;if(result.ok)stateUi.selectedUnit=null;break;
     case 'skill': result=activateSkill(stateUi.match,payload.unitId,payload.skillIndex??0);stateUi.match=result.state;break;
     case 'item': result=activateCarriedItem(stateUi.match,ownerId);stateUi.match=result.state;break;
-    case 'ready': stateUi.match=voteReady(stateUi.match,ownerId,true);result={ok:true};break;
+    case 'ready': stateUi.match=voteReady(stateUi.match,ownerId,payload.ready!==false);result={ok:true};break;
     case 'restart': result=restartBall(stateUi.match,ownerId,payload.x??(ownerId===0?1.4:11.6),payload.y??4.5);stateUi.match=result.state;break;
     case 'mark': stateUi.match=markCell(stateUi.match,ownerId,payload.x,payload.y);result={ok:true};break;
     case 'pause': stateUi.match=votePause(stateUi.match,ownerId,payload.paused);result={ok:true};break;
@@ -350,12 +350,21 @@ function dispatch(action,payload={}) {
   if(stateUi.online&&!stateUi.host){sendOnlineCommand(action,payload);return;}
   applyCommand(owner,action,payload);
 }
+function getClientToken() {
+  if(stateUi.clientToken)return stateUi.clientToken;
+  try{
+    const key='cujong-football-client-token';
+    let token=localStorage.getItem(key);
+    if(!token){token=crypto.randomUUID?crypto.randomUUID():String(Date.now())+'-'+Math.random().toString(36).slice(2);localStorage.setItem(key,token);}
+    stateUi.clientToken=token;return token;
+  }catch{return 'client-'+String(Date.now())+'-'+Math.random().toString(36).slice(2);}
+}
 function connectOnline(mode,roomId,wsUrl) {
   const socket=new WebSocket(wsUrl);
   stateUi.socket=socket;stateUi.online=true;stateUi.host=mode==='create';stateUi.roomId=roomId||null;
   $('roomStatus').textContent='正在连接房间服务…';
   socket.addEventListener('open',()=>{
-    const request={type:mode==='create'?'create':'join',roomId:roomId||'',clientName:'阵地足球玩家'};
+    const request={type:mode==='create'?'create':'join',roomId:roomId||'',clientName:'阵地足球玩家',clientToken:getClientToken()};
     socket.send(JSON.stringify(request));
   });
   socket.addEventListener('message',event=>{
@@ -365,14 +374,23 @@ function connectOnline(mode,roomId,wsUrl) {
       $('roomInput').value=message.roomId;
       $('roomStatus').textContent='房间 '+message.roomId+' 已连接，你是玩家 '+(message.ownerId+1)+'。';
       if(stateUi.host){
-        initializeMatch();
-        broadcastSnapshot();
+        if(message.hasSnapshot){
+          stateUi.resumeOnSnapshot=true;
+          $('roomStatus').textContent='正在从服务器恢复 '+message.roomId+' 的上次比赛状态…';
+        }else{
+          initializeMatch();
+          broadcastSnapshot();
+        }
       }else{
         $('roomStatus').textContent='已加入 '+message.roomId+'，等待房主同步比赛状态…';
       }
     }else if(message.type==='snapshot'&&message.state){
-      if(!stateUi.host)stateUi.match=message.state;
-      if(!$('deploymentPanel').style.display||$('deploymentPanel').style.display==='none')showGame();
+      if(stateUi.host&&stateUi.resumeOnSnapshot){
+        stateUi.match=message.state;stateUi.resumeOnSnapshot=false;stateUi.owner=0;
+        showGame();broadcastSnapshot();
+      }else if(!stateUi.host){
+        stateUi.match=message.state;stateUi.owner=stateUi.localOwner;showGame();
+      }
       renderPanels(true);
     }else if(message.type==='command'&&stateUi.host){
       applyCommand(message.ownerId,message.action,message.payload||{});
@@ -592,17 +610,21 @@ renderer.domElement.addEventListener('pointerdown',event=>{
 });
 $('owner0').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==0)return;stateUi.owner=0;stateUi.selectedUnit=null;renderPanels(true);});
 $('owner1').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==1)return;stateUi.owner=1;stateUi.selectedUnit=null;renderPanels(true);});
-$('readyButton').addEventListener('click',()=>dispatch('ready',{}));
+$('readyButton').addEventListener('click',()=>dispatch('ready',{ready:!stateUi.match?.readyVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
 $('pauseButton').addEventListener('click',()=>dispatch('pause',{paused:!stateUi.match?.pauseVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
 $('speedButton').addEventListener('click',()=>dispatch('speed',{fast:!stateUi.match?.speedVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
-$('skillButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('skill',{unitId:stateUi.selectedUnit,skillIndex:0});});
+$('skillButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('skill',{unitId:stateUi.selectedUnit,skillIndex:Number($('skillSelect').value||0)});});
 $('withdrawButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('withdraw',{unitId:stateUi.selectedUnit});});
 $('itemButton').addEventListener('click',()=>dispatch('item',{}));
 $('restartButton').addEventListener('click',()=>dispatch('restart',{x:stateUi.owner===0?1.6:10.4,y:4.5}));
 $('startMatch').addEventListener('click',startFromSetup);
-$('connectionMode').addEventListener('change',()=>{
-  $('onlineSetup').style.display=$('connectionMode').value==='local'?'none':'flex';
-});
+function updateConnectionSetup() {
+  const online=$('connectionMode').value!=='local';
+  $('onlineSetup').style.display='flex';
+  $('roomInput').style.display=online?'inline-block':'none';
+  $('wsInput').style.display=online?'inline-block':'none';
+}
+$('connectionMode').addEventListener('change',updateConnectionSetup);
 $('stageSelect').addEventListener('change',()=>{
   $('roomStatus').textContent=$('stageSelect').value==='elite'?'特级赛不套用技力需求 -20% 折扣；SP 自然回复仍按规则配置执行。':'选择阶段后会加载相应比赛时长、费用和技力参数。';
 });
@@ -612,6 +634,6 @@ window.__footballDebug={get state(){return stateUi.match;},get localOwner(){retu
     await loadPublicAssets();
     await loadOperatorCatalog();
   }catch(error){$('roomStatus').textContent='启动失败：'+error.message;}
-  $('onlineSetup').style.display='none';
+  updateConnectionSetup();
   requestAnimationFrame(animateFrame);
 })();
