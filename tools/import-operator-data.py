@@ -126,9 +126,10 @@ def classify_skill(skill, skill_id):
         }
         confidence = "blackboard-inferred"
 
+    skill_name = (levels[0].get("name") if levels and isinstance(levels[0], dict) else None) or skill.get("name", str(skill_id))
     return {
         "id": str(skill_id),
-        "name": skill.get("levels", [{}])[0].get("name", skill.get("name", str(skill_id))),
+        "name": skill_name,
         "description": text,
         "spCost": max(1, round(sp_cost or 20)),
         "initialSp": max(0, round(initial_sp or 0)),
