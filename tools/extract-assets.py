@@ -9,7 +9,7 @@
 
 ⚠ 解出的素材版权归鹰角网络 / Yostar，仅供个人学习；**不要把它们提交到公开仓库**（.gitignore 已排除）。
 """
-import argparse, os, sys, io, json
+import argparse, os, sys, io, json, re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -106,52 +106,96 @@ def group_audio(AB: Path):
 
 
 def group_chibi(UnityPy, AB: Path):
-    """小人骨骼：chararts/char_<id>.ab 里的 build_char_<id>.skel + 同名 .atlas + 页面 png。"""
+    """Extract Spine packages into /chibi/<operator-id>/ paths expected by the browser loader."""
     n = 0
     root = AB / "chararts"
     if not root.is_dir():
         print("  chararts/ 不存在")
         return
+
     for ab in sorted(root.glob("char_*.ab")):
+        operator_id = ab.stem.removeprefix("char_").replace("#", "_")
+        out = ASSETS / "chibi" / operator_id
         try:
             env = UnityPy.load(str(ab))
-        except Exception:
+        except Exception as exc:
+            print(f"  [chibi] skip {ab.name}: {exc}")
             continue
-        skels = {}
-        for o in env.objects:
-            if o.type.name != "TextAsset":
-                continue
-            d = o.read()
-            nm = getattr(d, "m_Name", "")
-            if nm.endswith(".skel"):
-                skels[nm] = bytes(d.m_Script) if not isinstance(d.m_Script, str) else d.m_Script.encode("latin-1")
-        for skel_name, skel_bytes in skels.items():
-            stem = skel_name[:-5]                      # build_char_002_amiya
-            safe = skel_name.replace("#", "_")[:-5]
-            out = ASSETS / "chibi" / safe
-            out.mkdir(parents=True, exist_ok=True)
-            (out / f"{safe}.skel").write_bytes(skel_bytes)
-        # atlas + 页面 png 与 skel 同 bundle
-        if skels:
-            for o in env.objects:
-                d = o.read()
-                nm = getattr(d, "m_Name", "")
-                if nm.endswith(".atlas"):
-                    safe = nm.replace("#", "_")[:-6]
-                    out = ASSETS / "chibi" / safe
-                    out.mkdir(parents=True, exist_ok=True)
-                    txt = d.m_Script if isinstance(d.m_Script, str) else bytes(d.m_Script).decode("utf-8", "ignore")
-                    (out / f"{safe}.atlas").write_text(txt.replace("#", "_"), encoding="utf-8")
-                elif o.type.name == "Texture2D" and nm.endswith(".png"):
-                    safe = nm.replace("#", "_")[:-4]
-                    out = ASSETS / "chibi" / safe
-                    img = getattr(d, "image", None)
-                    if img is not None:
-                        out.mkdir(parents=True, exist_ok=True)
-                        img.save(out / f"{safe}.png")
-            n += len(skels)
-    print(f"[chibi] {n} 套骨骼")
 
+        skels = []
+        atlases = []
+        texture_objects = []
+        for obj in env.objects:
+            try:
+                data = obj.read()
+            except Exception:
+                continue
+            name = getattr(data, "m_Name", "")
+            if obj.type.name == "TextAsset":
+                if name.endswith(".skel"):
+                    skels.append((name, data.m_Script))
+                elif name.endswith(".atlas"):
+                    atlas_text = data.m_Script
+                    if not isinstance(atlas_text, str):
+                        atlas_text = bytes(atlas_text).decode("utf-8", "ignore")
+                    atlases.append((name, atlas_text.replace("#", "_")))
+            elif obj.type.name == "Texture2D":
+                image = getattr(data, "image", None)
+                if image is not None:
+                    texture_objects.append((name.replace("#", "_"), image))
+
+        if not skels:
+            continue
+
+        out.mkdir(parents=True, exist_ok=True)
+        # Prefer the matching build_char_<id> skeleton; otherwise use the first valid skeleton.
+        wanted = f"build_char_{operator_id}".lower()
+        chosen = next((x for x in skels if x[0].replace("#", "_").lower().startswith(wanted)), skels[0])
+        skel_bytes = chosen[1]
+        if isinstance(skel_bytes, str):
+            skel_bytes = skel_bytes.encode("latin-1", "ignore")
+        else:
+            skel_bytes = bytes(skel_bytes)
+        (out / f"{operator_id}.skel").write_bytes(skel_bytes)
+
+        # Spine atlas page names must agree with the texture filenames listed by /__chibi.
+        atlas_text = atlases[0][1] if atlases else ""
+        page_names = []
+        for line in atlas_text.splitlines():
+            stripped = line.strip()
+            if stripped.lower().endswith(".png") and ":" not in stripped:
+                page_names.append(stripped)
+        if not page_names:
+            page_names = [f"{operator_id}.png"]
+
+        used_textures = set()
+        for page_index, original_page in enumerate(page_names):
+            page_stem = Path(original_page).stem.replace("#", "_").lower()
+            matched = next(
+                (x for x in texture_objects
+                 if Path(x[0]).stem.lower() == page_stem
+                 or x[0].lower() == original_page.lower()),
+                None,
+            )
+            # Some client bundles strip ".png" from the Unity texture name.
+            if matched is None:
+                matched = next((x for x in texture_objects if Path(x[0]).stem.lower() in page_stem
+                                or page_stem in Path(x[0]).stem.lower()), None)
+            if matched is None and len(page_names) == 1 and texture_objects:
+                matched = texture_objects[0]
+            if matched:
+                filename = f"{operator_id}.png" if len(page_names) == 1 else f"{operator_id}-{page_index:02d}.png"
+                matched[1].save(out / filename)
+                used_textures.add(matched[0])
+                atlas_text = atlas_text.replace(original_page, filename)
+
+        if atlas_text:
+            (out / f"{operator_id}.atlas").write_text(atlas_text, encoding="utf-8")
+        n += 1
+        if not (out / f"{operator_id}.png").exists():
+            print(f"  [chibi] warning: {operator_id} skeleton extracted without its atlas page texture")
+
+    print(f"[chibi] {n} operator package(s), normalized to assets/chibi/<operator-id>/")
 
 def main():
     ap = argparse.ArgumentParser()
