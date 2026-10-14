@@ -53,7 +53,8 @@ test('skills consume discounted SP and displacement is weight-gated', () => {
   state.teams[0].sp.pusher = 30;
   const activated = activateSkill(state, 0, state.teams[0].deployed[0].id);
   assert.equal(activated.ok, true);
-  assert.equal(activated.state.teams[0].sp.pusher, 12);
+  // football 规则：技能需求 −20% ⇒ needed = ceil(16 × 0.8) = 13 ⇒ 30 − 13 = 17
+  assert.equal(activated.state.teams[0].sp.pusher, 17);
   const moved = moveBallBySkill(activated.state, 0, activated.state.teams[0].deployed[0].id, { x: 1, y: 0 });
   assert.equal(moved.ok, true);
   const tooHeavy = { ...moved.state, ball: { ...moved.state.ball, type: 'heavy' } };
