@@ -29,5 +29,11 @@ jobs:
         run: node --test tools/test-football-rules.mjs
       - name: Test match state engine
         run: node --test tools/test-match-engine.mjs
+      - name: Install minimal room relay dependency
+        run: python -m pip install -r requirements.txt
+      - name: Test WebSocket room relay helpers
+        run: python -m unittest tools.test_room_server
       - name: Validate distributable fallback assets
         run: python tools/check-assets.py
+      - name: Validate Python tooling syntax
+        run: python -m compileall -q server tools
