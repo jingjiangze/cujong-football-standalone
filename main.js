@@ -6,6 +6,7 @@ import {
   withdrawOperator, activateSkill, activateCarriedItem, startBattle, tickMatch,
   restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, voteReady, requestCost, respondCostRequest, computeMatchSummary,
 } from './lib/football/match-engine.mjs';
+import { decideAiTeammateCommands, pickNextControllableUnit } from './lib/football/ai-teammates.mjs';
 
 const $ = (id) => document.getElementById(id);
 const stateUi = {
@@ -14,6 +15,7 @@ const stateUi = {
   lastBroadcast:0, lastDrawKey:'', iconUrls:{}, iconSheetText:null,
   simAccumulator:0, previousFrame:performance.now(), running:false, loading:false,
   chosenRoster:new Set(), lastError:null, lastEvents:[], resumeOnSnapshot:false, clientToken:null,
+  singlePlayer:false, aiClock:0, aiOwnerIds:[1],
 };
 
 const profileNames = {
@@ -527,11 +529,12 @@ function initializeMatch() {
   const seed=Date.now()>>>0;
   const stageId=$('stageSelect').value,styleId=$('teamStyle').value,ballType=$('ballType').value,rulesetId=$('rulesetSelect').value;
   stateUi.match=createMatchState({stageId,styleId,ballType,rulesetId,operators,seed});
-  stateUi.match.mode='two-player';
+  stateUi.match.mode=stateUi.singlePlayer?'single-player':'two-player';
   stateUi.match.iceCells={};stateUi.match.slimeCells={};
   stateUi.match=chooseOpponentTeam(stateUi.match,$('teamSelect').value);
   stateUi.owner=stateUi.online?stateUi.localOwner:0;
   stateUi.selectedBench=operators[0]?.id||null;stateUi.selectedUnit=null;
+  stateUi.aiClock=0;
   showGame();
 }
 async function startFromSetup() {
@@ -539,10 +542,14 @@ async function startFromSetup() {
   stateUi.loading=true;$('startMatch').disabled=true;
   const mode=$('connectionMode').value;
   try{
-    if(mode==='local'){
-      stateUi.online=false;stateUi.host=false;stateUi.localOwner=0;stateUi.roomId=null;
+    if(mode==='single'){
+      stateUi.online=false;stateUi.host=false;stateUi.localOwner=0;stateUi.roomId=null;stateUi.singlePlayer=true;
+      initializeMatch();
+    }else if(mode==='local'){
+      stateUi.online=false;stateUi.host=false;stateUi.localOwner=0;stateUi.roomId=null;stateUi.singlePlayer=false;
       initializeMatch();
     }else{
+      stateUi.singlePlayer=false;
       const roomId=$('roomInput').value.trim();
       const wsUrl=$('wsInput').value.trim()||'ws://127.0.0.1:8765';
       connectOnline(mode,roomId,wsUrl);
@@ -672,11 +679,14 @@ function renderActionControls() {
     skill.disabled=true;skill.textContent='释放技能';skillSelect.innerHTML='<option value="0">先选择场上干员</option>';skillSelect.disabled=true;withdraw.disabled=true;
   }
   $('cost0').textContent='P1 费用 '+match.players[0].cost;
-  $('cost1').textContent='P2 费用 '+match.players[1].cost;
-  $('readyButton').textContent=match.phase==='battle'?'作战进行中':match.phase==='finished'?'本局结束':match.readyVotes?.[stateUi.owner]?'已准备，等待队友':'我已准备';
+  $('cost1').textContent=stateUi.singlePlayer?('AI 队友费用 '+match.players[1].cost):('P2 费用 '+match.players[1].cost);
+  const myReady=stateUi.match.readyVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner];
+  $('readyButton').textContent=match.phase==='battle'?'作战进行中':match.phase==='finished'?'本局结束':myReady?'已准备，等待队友':'我已准备';
   $('readyButton').disabled=match.phase!=='deployment';
   $('pauseButton').textContent=match.paused?'恢复作战':'协同暂停';
   $('speedButton').textContent=match.speed===2?'恢复一倍速':'协同二倍速';
+  const switchButton=$('switchUnitButton');
+  if(switchButton)switchButton.style.display=stateUi.singlePlayer?'inline-block':'none';
   const request=match.pendingCostRequest;
   const player=chosenPlayer();
   $('requestCostButton').disabled=!!request||(player?.costRequestCooldown||0)>0||!player||player.cost>=99;
@@ -703,7 +713,7 @@ function renderPanels(force=false) {
   $('owner0').classList.toggle('active',stateUi.owner===0);$('owner1').classList.toggle('active',stateUi.owner===1);
   $('owner0').disabled=stateUi.online&&stateUi.localOwner!==0;$('owner1').disabled=stateUi.online&&stateUi.localOwner!==1;
   const profile=getBallProfile(match.ball.type);
-  $('matchInfo').textContent='阶段：'+(MATCH_STAGES[match.stageId]?.label||match.stageId)+'\\n球队：'+(teamName[match.opponentTeamId]||match.opponentTeamId)+'\\n风格：'+(styleName[match.styleId]||match.styleId)+'\\n足球：'+(profileNames[match.ball.type]||match.ball.type)+'\\n推动伤害：'+Math.floor(match.ball.damage)+' / '+getPushThreshold(match.ball)+'\\n重量等级：'+profile.weight+'\\n球速：'+Math.hypot(match.ball.vx,match.ball.vy).toFixed(2)+'\\n球员：'+match.fieldUnits.length+' 位\\n当前控制：玩家 '+(stateUi.owner+1)+'\\n阶段状态：'+match.phase;
+  $('matchInfo').textContent='模式：'+(stateUi.singlePlayer?'单人 + 2 AI 队友':'双人协同')+'\n阶段：'+(MATCH_STAGES[match.stageId]?.label||match.stageId)+'\n球队：'+(teamName[match.opponentTeamId]||match.opponentTeamId)+'\n风格：'+(styleName[match.styleId]||match.styleId)+'\n足球：'+(profileNames[match.ball.type]||match.ball.type)+'\n推动伤害：'+Math.floor(match.ball.damage)+' / '+getPushThreshold(match.ball)+'\n重量等级：'+profile.weight+'\n球速：'+Math.hypot(match.ball.vx,match.ball.vy).toFixed(2)+'\n球员：'+match.fieldUnits.length+' 位\n当前控制：'+(stateUi.singlePlayer?(stateUi.selectedUnit?'你控制的干员':'未选择（Tab 切换）'):('玩家 '+(stateUi.owner+1)))+'\n阶段状态：'+match.phase;
   $('statusLine').textContent=match.ballInBench?'守门/阻挡后重新开球窗口：'+Math.ceil(match.restart.remaining)+' 秒。':match.phase==='deployment'?'选择干员并部署。双方确认准备后开始战斗。':match.phase==='battle'?'自动作战中：点击场上干员可选中并释放技能；点击空格可部署待部署干员。':match.phase==='finished'?'终场：净胜 '+(match.score.ally-match.score.enemy)+' 球，获得 '+match.stamps+' 枚嘉奖印章。':'';
   renderBench();renderUnitControls();renderActionControls();
   const lastEvents=match.events.slice(-5).map(event=>event.type==='GOAL'?'进球：'+event.score.ally+':'+event.score.enemy:event.type==='BALL_PUSHED'?'足球被推动':event.type==='OPERATOR_DEPLOYED'?'部署：'+event.operatorId:event.type==='OPERATOR_WITHDRAWN'?'撤退：'+event.operatorId:event.type==='UNIT_DOWN'?'球员进入喘息：'+event.unitId:event.type==='CARRY_ITEM_TRIGGERED'?'携带物触发：'+event.itemId:event.type);
@@ -712,6 +722,7 @@ function renderPanels(force=false) {
 function updateEngine(delta) {
   if(!stateUi.match||!stateUi.running)return;
   if(stateUi.online&&!stateUi.host)return;
+  if(stateUi.singlePlayer)runAiTeammates(delta);
   stateUi.simAccumulator+=Math.min(.1,delta)*(stateUi.match.speed||1);
   let ticked=false;
   while(stateUi.simAccumulator>=.05){
@@ -721,6 +732,22 @@ function updateEngine(delta) {
   if(ticked&&stateUi.online&&stateUi.host&&performance.now()-stateUi.lastBroadcast>180){
     broadcastSnapshot();stateUi.lastBroadcast=performance.now();
   }
+}
+/**
+ * 单人模式的 AI 队友驱动：只读 state，产出命令后经 applyCommand 走同一条引擎接口。
+ * 用固定节拍（约每 0.5s 决策一次）而非每帧决策，避免同帧重复部署/重复放技能。
+ */
+function runAiTeammates(delta) {
+  if(!stateUi.match||stateUi.match.gameOver)return;
+  stateUi.aiClock+=delta;
+  if(stateUi.aiClock<0.5)return;
+  stateUi.aiClock=0;
+  const profile=getBallProfile(stateUi.match.ball.type);
+  for(const ownerId of stateUi.aiOwnerIds){
+    const commands=decideAiTeammateCommands(stateUi.match,ownerId,profile);
+    for(const command of commands)applyCommand(ownerId,command.action,command.payload);
+  }
+  if(stateUi.match.phase==='finished')return;
 }
 function animateFrame(now) {
   const dt=Math.max(0,Math.min(.1,(now-stateUi.previousFrame)/1000));stateUi.previousFrame=now;
@@ -747,6 +774,22 @@ renderer.domElement.addEventListener('pointerdown',event=>{
 });
 $('owner0').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==0)return;stateUi.owner=0;stateUi.selectedUnit=null;renderPanels(true);});
 $('owner1').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==1)return;stateUi.owner=1;stateUi.selectedUnit=null;renderPanels(true);});
+function switchControlledUnit() {
+  if(!stateUi.match||!stateUi.singlePlayer)return;
+  const nextId=pickNextControllableUnit(stateUi.match,stateUi.selectedUnit);
+  if(!nextId){toast('场上还没有你的干员，先从待部署区派一人上场。');return;}
+  stateUi.selectedUnit=nextId;stateUi.selectedBench=null;
+  renderPanels(true);
+  const unit=stateUi.match.fieldUnits.find(item=>item.id===nextId);
+  if(unit)toast('已切换控制：'+(unit.name||unit.operatorId));
+}
+$('switchUnitButton')?.addEventListener('click',switchControlledUnit);
+window.addEventListener('keydown',event=>{
+  if(event.key!=='Tab'||!stateUi.match||$('pick').style.display!=='none')return;
+  if(!stateUi.singlePlayer)return;
+  event.preventDefault();
+  switchControlledUnit();
+});
 $('readyButton').addEventListener('click',()=>dispatch('ready',{ready:!stateUi.match?.readyVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
 $('pauseButton').addEventListener('click',()=>dispatch('pause',{paused:!stateUi.match?.pauseVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
 $('speedButton').addEventListener('click',()=>dispatch('speed',{fast:!stateUi.match?.speedVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
@@ -759,10 +802,12 @@ $('declineCostButton').addEventListener('click',()=>dispatch('respondCost',{acce
 $('restartButton').addEventListener('click',()=>dispatch('restart',{x:stateUi.owner===0?1.6:10.4,y:4.5}));
 $('startMatch').addEventListener('click',startFromSetup);
 function updateConnectionSetup() {
-  const online=$('connectionMode').value!=='local';
+  const online=$('connectionMode').value!=='local'&&$('connectionMode').value!=='single';
+  stateUi.singlePlayer=$('connectionMode').value==='single';
   $('onlineSetup').style.display='flex';
   $('roomInput').style.display=online?'inline-block':'none';
   $('wsInput').style.display=online?'inline-block':'none';
+  $('playerBar').style.display=stateUi.singlePlayer?'none':'flex';
 }
 $('connectionMode').addEventListener('change',updateConnectionSetup);
 $('stageSelect').addEventListener('change',()=>{

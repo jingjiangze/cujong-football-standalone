@@ -5,9 +5,15 @@ on:
     branches:
       - main
       - "fix/**"
+      - "feat/**"
   pull_request:
     branches:
       - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
   workflow_dispatch:
 
 permissions:
@@ -29,6 +35,8 @@ jobs:
         run: node --test tools/test-football-rules.mjs
       - name: Test match engine
         run: node --test tools/test-match-engine.mjs
+      - name: Test single-player AI teammates
+        run: node --test tools/test-ai-teammates.mjs
       - name: Test match state machine
         run: node --test tools/test-match-state.mjs
       - name: Install minimal room relay dependency

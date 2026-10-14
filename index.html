@@ -89,7 +89,7 @@ button,input,select{font:inherit}button{border:1px solid #40566a;border-radius:7
     <span class="pill" id="cost0">费用 30</span><span class="pill" id="cost1">费用 30</span>
     <span class="grow"></span>
     <button id="requestCostButton">请求费用</button><button id="acceptCostButton" style="display:none">同意费用请求</button><button id="declineCostButton" style="display:none">拒绝费用请求</button>
-    <button id="readyButton">我已准备</button><button id="pauseButton">协同暂停</button><button id="speedButton">协同二倍速</button>
+    <button id="readyButton">我已准备</button><button id="pauseButton">协同暂停</button><button id="speedButton">协同二倍速</button><button id="switchUnitButton" style="display:none">切换控制角色</button>
   </div>
   <div id="bench" aria-label="待部署干员"></div>
   <div id="unitControls" aria-label="场上干员"></div>
@@ -106,7 +106,7 @@ button,input,select{font:inherit}button{border:1px solid #40566a;border-radius:7
   <p class="subtitle">玩法内核：部署干员、费用增长、技力自然恢复、重量限制的位移带球、守门/阻挡、射门结算与携带物。默认使用仓库自带原创图标；本机提取的官方素材仅供个人客户端使用。</p>
   <div id="setupGrid">
     <div class="setup-field"><label for="stageSelect">比赛阶段</label><select id="stageSelect"><option value="training">训练场</option><option value="beginner" selected>初级赛</option><option value="advanced">高级赛</option><option value="elite">特级赛</option></select></div>
-    <div class="setup-field"><label for="rulesetSelect">规则版本</label><select id="rulesetSelect"><option value="classic" selected>促融共竞 #1（再部署减半）</option><option value="updated">后续阵地足球（再部署不减半）</option></select></div>
+    <div class="setup-field"><label for="rulesetSelect">规则版本</label><select id="rulesetSelect"><option value="updated" selected>后续阵地足球（再部署不减半）</option><option value="classic">促融共竞 #1（再部署减半）</option></select></div>
     <div class="setup-field"><label for="teamSelect">对手球队</label><select id="teamSelect"><option value="standard">标准队</option><option value="tactical">战术队</option><option value="loveBall">爱球会</option><option value="fairPlay">球德联</option></select></div>
     <div class="setup-field"><label for="ballType">足球规则</label><select id="ballType"><option value="standard">RMA70 刺球</option><option value="light">粉红绒气球</option><option value="heavy">压缩建材球</option><option value="explosive">高能源石球</option><option value="triple">至纯源石球</option><option value="bouncy">无垠回荡球</option><option value="leaking">漏气甲虫球</option><option value="inflating">膨胀甲虫球</option><option value="arctic">北境意志球</option><option value="slime">底海滑动球</option></select></div>
     <div class="setup-field"><label for="teamStyle">我方比赛风格</label><select id="teamStyle"><option value="basic">基础</option><option value="anchoring">驻场</option><option value="roaming">游走</option><option value="offensive">攻坚</option><option value="supportive">支援</option><option value="disabling">控制</option></select></div>
@@ -114,7 +114,7 @@ button,input,select{font:inherit}button{border:1px solid #40566a;border-radius:7
   <p class="subtitle">选择可用干员。这里的六位基础数据为可运行的回退目录；要扩大到本地已安装客户端的完整干员/技能目录，请用素材工具生成本地数据。</p>
   <div id="rosterPick"></div>
   <div id="onlineSetup">
-    <select id="connectionMode"><option value="local">本机双人</option><option value="create">创建联机房间</option><option value="join">加入联机房间</option></select>
+    <select id="connectionMode"><option value="single">单人 + 2 AI 队友</option><option value="local">本机双人</option><option value="create">创建联机房间</option><option value="join">加入联机房间</option></select>
     <input id="roomInput" placeholder="房间码，例如 FOOTBALL-123" maxlength="40">
     <input id="wsInput" placeholder="ws://127.0.0.1:8765" value="ws://127.0.0.1:8765">
   </div>

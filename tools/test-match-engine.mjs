@@ -158,8 +158,9 @@ test('ruleset versions apply different redeploy timers and elite SP costs', () =
     assert.equal(withdrawn.state.redeployRemaining[deployed.unitId],expectedDelay);
   }
 
-  const eliteRoster=[{...roster[0],skills:[{id:'elite-cost',name:'SP test',spCost:10,initialSp:20,cooldownSeconds:1,effect:{type:'attack-buff',duration:1}}]}];
-  for (const [rulesetId, expectedRemaining] of [['classic',12],['updated',10]]) {
+  // spCost 取 13：10/0.8 会整除而绕过 Math.ceil，13*0.8=10.4 才真正走进向上取整分支
+  const eliteRoster=[{...roster[0],skills:[{id:'elite-cost',name:'SP test',spCost:13,initialSp:20,cooldownSeconds:1,effect:{type:'attack-buff',duration:1}}]}];
+  for (const [rulesetId, expectedRemaining] of [['classic',9],['updated',7]]) {
     let state=createMatchState({rulesetId,stageId:'elite',operators:eliteRoster});
     const deployed=deployOperator(state,0,'test-vanguard',3,3);
     const activated=activateSkill(deployed.state,deployed.unitId,0);
