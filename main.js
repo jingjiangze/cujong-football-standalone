@@ -63,7 +63,7 @@ const tileMeshes = [];
 const tileTopMaterials = [];
 const staticScene = new T.Group(); scene.add(staticScene);
 const dynamicScene = new T.Group(); scene.add(dynamicScene);
-let ballMesh = null, ballArrow = null, barrierMeshes = new Map(), unitMeshes = new Map();
+let ballMesh = null, ballArrow = null, barrierMeshes = new Map(), unitMeshes = new Map(), carriedItemMeshes = new Map();
 let boardGrid = null;
 let officialGroundLoaded = false;
 
@@ -313,6 +313,34 @@ function syncBarrierMeshes() {
     if(!mesh){mesh=box(dynamicScene,.78,.65,.78,0xd5a447,barrier.x,.33,barrier.y,{metalness:.35,roughness:.42});barrierMeshes.set(barrier.id,mesh);}
     mesh.position.set(barrier.x,.33,barrier.y);
     const health=barrier.hp/barrier.maxHp;mesh.material.color.setHex(health>.66?0xd5a447:health>.33?0xc77c35:0xb94c42);
+  }
+}
+function syncCarriedItemMeshes() {
+  const match=stateUi.match;if(!match)return;
+  const live=new Set((match.deployedItems||[]).map(item=>item.id));
+  for(const [id,mesh] of carriedItemMeshes){
+    if(!live.has(id)){dynamicScene.remove(mesh);mesh.geometry.dispose();mesh.material.dispose();carriedItemMeshes.delete(id);}
+  }
+  const itemColors={
+    'cheer-squad':0xed9e3a,'armor-distributor':0x6ab6ce,'firework-box':0x9c8add,
+    'energy-drink':0xf17d5c,'soda-machine':0x79be9a,'illusion-mirror':0x87a2df
+  };
+  for(const item of match.deployedItems||[]){
+    let mesh=carriedItemMeshes.get(item.id);
+    if(!mesh){
+      const group=new T.Group();
+      const gem=new T.Mesh(new T.OctahedronGeometry(.27,0),new T.MeshStandardMaterial({
+        color:itemColors[item.itemId]||0xd5b9f2,emissive:itemColors[item.itemId]||0x634b84,emissiveIntensity:.2,
+        roughness:.35,metalness:.25
+      }));
+      gem.position.y=.4;group.add(gem);
+      const ring=new T.Mesh(new T.TorusGeometry(.31,.025,8,28),new T.MeshBasicMaterial({color:0xf3e5a4,transparent:true,opacity:.8}));
+      ring.rotation.x=Math.PI/2;ring.position.y=.1;group.add(ring);
+      mesh=group;dynamicScene.add(mesh);carriedItemMeshes.set(item.id,mesh);
+    }
+    mesh.position.set(item.x,0,item.y);
+    const pulse=1+Math.sin((stateUi.match.elapsed||0)*5)*.035;
+    mesh.scale.setScalar(pulse);
   }
 }
 function syncBallMesh() {
@@ -690,7 +718,7 @@ function updateEngine(delta) {
 function animateFrame(now) {
   const dt=Math.max(0,Math.min(.1,(now-stateUi.previousFrame)/1000));stateUi.previousFrame=now;
   updateEngine(dt);
-  syncUnitMeshes();syncBarrierMeshes();syncBallMesh();
+  syncUnitMeshes();syncBarrierMeshes();syncCarriedItemMeshes();syncBallMesh();
   renderer.render(scene,camera);
   if(stateUi.match)renderPanels(false);
   requestAnimationFrame(animateFrame);
