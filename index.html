@@ -88,14 +88,15 @@ button,input,select{font:inherit}button{border:1px solid #40566a;border-radius:7
     <button id="owner1">玩家 2</button>
     <span class="pill" id="cost0">费用 30</span><span class="pill" id="cost1">费用 30</span>
     <span class="grow"></span>
-    <button id="readyButton">开始战斗</button><button id="pauseButton">协同暂停</button><button id="speedButton">协同二倍速</button>
+    <button id="requestCostButton">请求费用</button><button id="acceptCostButton" style="display:none">同意费用请求</button><button id="declineCostButton" style="display:none">拒绝费用请求</button>
+    <button id="readyButton">我已准备</button><button id="pauseButton">协同暂停</button><button id="speedButton">协同二倍速</button>
   </div>
   <div id="bench" aria-label="待部署干员"></div>
   <div id="unitControls" aria-label="场上干员"></div>
   <div id="selectedActions">
     <span id="selectedLabel">选择待部署干员，再点击蓝色方格部署；选中场上干员可使用技能或撤退。</span>
     <select id="skillSelect" disabled aria-label="技能选择"><option value="0">先选择场上干员</option></select>
-    <button id="skillButton" disabled>释放技能</button><button id="withdrawButton" disabled>撤退</button><button id="itemButton">使用携带物</button><button id="restartButton" style="display:none">重新开球</button>
+    <button id="skillButton" disabled>释放技能</button><button id="withdrawButton" disabled>撤退</button><button id="itemButton">选择携带物部署</button><button id="restartButton" style="display:none">重新开球</button>
   </div>
   <div id="statusLine">玩家 1 与玩家 2 共用球场；每次进球后，所有己方干员撤退并进入再部署计时。</div>
 </section>
