@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BALL_PROFILES, createBallState, calculatePushDirection, getPushThreshold,
-  applyOperatorHit, advanceBallMotion,
+  applyOperatorHit, applySkillDisplacement, canBlockBall, canDisplaceBall, advanceBallMotion,
 } from '../lib/football-rules.mjs';
 
 test('all official ball profiles retain their published values', () => {
@@ -16,6 +16,9 @@ test('all official ball profiles retain their published values', () => {
   assert.equal(BALL_PROFILES.heavy.restitution, 1);
   assert.equal(BALL_PROFILES.triple.scoreMultiplier, 3);
   assert.equal(BALL_PROFILES.explosive.explosionDamage, 1500);
+  assert.equal(BALL_PROFILES.explosive.weight, 1);
+  assert.equal(BALL_PROFILES.triple.weight, 2);
+  assert.equal(BALL_PROFILES.bouncy.weight, 0);
 });
 
 test('ball accumulates damage and does not move before threshold', () => {
@@ -90,4 +93,24 @@ test('ice and slime terrain apply different friction multipliers', () => {
   advanceBallMotion(icy, 1, 0.4);
   advanceBallMotion(sticky, 1, 1.8);
   assert.ok(icy.vx > sticky.vx);
+});
+
+test('football blocks only when at least three block slots remain', () => {
+  const ball = createBallState('standard');
+  assert.equal(canBlockBall({ blockCount: 2, occupiedBlockCount: 0 }, ball), false);
+  assert.equal(canBlockBall({ blockCount: 3, occupiedBlockCount: 0 }, ball), true);
+  assert.equal(canBlockBall({ blockCount: 4, occupiedBlockCount: 2 }, ball), false);
+  assert.equal(canBlockBall({ role: 'goalkeeper', blockCount: 0, occupiedBlockCount: 0 }, ball), true);
+});
+
+test('direct skill displacement obeys football weight rather than attack threshold', () => {
+  const heavy = createBallState('heavy', 2.5, 2.5);
+  const blocked = applySkillDisplacement(heavy, { id: 'shift', x: 1.5, y: 2.5 }, 1);
+  assert.equal(blocked.displaced, false);
+  assert.equal(heavy.vx, 0);
+
+  const moved = applySkillDisplacement(heavy, { id: 'shift', x: 1.5, y: 2.5 }, 2);
+  assert.equal(moved.displaced, true);
+  assert.ok(heavy.vx > 0);
+  assert.equal(heavy.damage, 0);
 });
