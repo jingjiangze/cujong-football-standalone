@@ -4,7 +4,7 @@ import { getBallProfile, getPushThreshold } from './lib/football-rules.mjs';
 import {
   MATCH_STAGES, MATCH_STYLES, OPPONENT_TEAMS, createMatchState, deployOperator,
   withdrawOperator, activateSkill, activateCarriedItem, startBattle, tickMatch,
-  restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, computeMatchSummary,
+  restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, voteReady, computeMatchSummary,
 } from './lib/football/match-engine.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -332,7 +332,7 @@ function applyCommand(ownerId,action,payload={}) {
     case 'withdraw': result=withdrawOperator(stateUi.match,payload.unitId);stateUi.match=result.state;if(result.ok)stateUi.selectedUnit=null;break;
     case 'skill': result=activateSkill(stateUi.match,payload.unitId,payload.skillIndex??0);stateUi.match=result.state;break;
     case 'item': result=activateCarriedItem(stateUi.match,ownerId);stateUi.match=result.state;break;
-    case 'start': stateUi.match=startBattle(stateUi.match);result={ok:true};break;
+    case 'ready': stateUi.match=voteReady(stateUi.match,ownerId,true);result={ok:true};break;
     case 'restart': result=restartBall(stateUi.match,ownerId,payload.x??(ownerId===0?1.4:11.6),payload.y??4.5);stateUi.match=result.state;break;
     case 'mark': stateUi.match=markCell(stateUi.match,ownerId,payload.x,payload.y);result={ok:true};break;
     case 'pause': stateUi.match=votePause(stateUi.match,ownerId,payload.paused);result={ok:true};break;
@@ -361,7 +361,7 @@ function connectOnline(mode,roomId,wsUrl) {
   socket.addEventListener('message',event=>{
     let message;try{message=JSON.parse(event.data);}catch{return;}
     if(message.type==='assigned'){
-      stateUi.localOwner=message.ownerId;stateUi.roomId=message.roomId;
+      stateUi.localOwner=message.ownerId;stateUi.owner=message.ownerId;stateUi.roomId=message.roomId;
       $('roomInput').value=message.roomId;
       $('roomStatus').textContent='房间 '+message.roomId+' 已连接，你是玩家 '+(message.ownerId+1)+'。';
       if(stateUi.host){
@@ -371,8 +371,7 @@ function connectOnline(mode,roomId,wsUrl) {
         $('roomStatus').textContent='已加入 '+message.roomId+'，等待房主同步比赛状态…';
       }
     }else if(message.type==='snapshot'&&message.state){
-      stateUi.match=message.state;
-      stateUi.host=false;
+      if(!stateUi.host)stateUi.match=message.state;
       if(!$('deploymentPanel').style.display||$('deploymentPanel').style.display==='none')showGame();
       renderPanels(true);
     }else if(message.type==='command'&&stateUi.host){
@@ -529,7 +528,7 @@ function renderActionControls() {
   }
   $('cost0').textContent='P1 费用 '+match.players[0].cost;
   $('cost1').textContent='P2 费用 '+match.players[1].cost;
-  $('readyButton').textContent=match.phase==='battle'?'作战进行中':match.phase==='finished'?'本局结束':'开始战斗';
+  $('readyButton').textContent=match.phase==='battle'?'作战进行中':match.phase==='finished'?'本局结束':match.readyVotes?.[stateUi.owner]?'已准备，等待队友':'我已准备';
   $('readyButton').disabled=match.phase!=='deployment';
   $('pauseButton').textContent=match.paused?'恢复作战':'协同暂停';
   $('speedButton').textContent=match.speed===2?'恢复一倍速':'协同二倍速';
@@ -587,13 +586,13 @@ renderer.domElement.addEventListener('pointerdown',event=>{
   if(!stateUi.match||$('pick').style.display!=='none')return;
   const cell=pickTile(event);if(!cell)return;
   if(stateUi.selectedBench){tryDeployAtCell(cell);return;}
-  const unit=stateUi.match.fieldUnits.find(candidate=>Math.round(candidate.x)===cell.x&&Math.round(candidate.y)===cell.y);
+  const unit=stateUi.match.fieldUnits.find(candidate=>Math.floor(candidate.x)===cell.x&&Math.floor(candidate.y)===cell.y);
   if(unit){stateUi.selectedUnit=unit.id;stateUi.owner=unit.ownerId;stateUi.selectedBench=null;renderPanels(true);return;}
   dispatch('mark',{x:cell.x,y:cell.y});
 });
 $('owner0').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==0)return;stateUi.owner=0;stateUi.selectedUnit=null;renderPanels(true);});
 $('owner1').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==1)return;stateUi.owner=1;stateUi.selectedUnit=null;renderPanels(true);});
-$('readyButton').addEventListener('click',()=>dispatch('start',{}));
+$('readyButton').addEventListener('click',()=>dispatch('ready',{}));
 $('pauseButton').addEventListener('click',()=>dispatch('pause',{paused:!stateUi.match?.pauseVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
 $('speedButton').addEventListener('click',()=>dispatch('speed',{fast:!stateUi.match?.speedVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
 $('skillButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('skill',{unitId:stateUi.selectedUnit,skillIndex:0});});
