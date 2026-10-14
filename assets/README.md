@@ -25,12 +25,13 @@
 ```powershell
 py -m pip install UnityPy lz4 Pillow
 py tools/extract-assets.py --ab "C:\\Path\\To\\Arknights_Data\\StreamingAssets\\AB\\Windows"
+py tools/import-operator-data.py --character-table "C:\\Path\\To\\Arknights_Data\\StreamingAssets\\gamedata\\excel\\character_table.json" --skill-table "C:\\Path\\To\\Arknights_Data\\StreamingAssets\\gamedata\\excel\\skill_table.json"
 py tools/check-assets.py
 ```
 
-提取器会把骨骼包的路径规范化为页面需要的 `/chibi/<operator-id>/`。如果某个客户端版本中的骨骼/纹理命名变化，检查脚本会列出缺项，页面仍应使用公共回退素材而不是让单位消失。
+提取器会把骨骼包的路径规范化为页面需要的 `/chibi/<operator-id>/`。`import-operator-data.py` 将本机干员属性、费用、阻挡和技能的SP字段导出到被 Git 忽略的 `assets/local/operators.generated.json`；页面优先读取此目录，然后回退到仓库内六名干员的示例数据。复杂技能效果根据本地 blackboard/描述推导，脚本会标注其推断性质；没有逐技能覆盖表验证之前，不应把所有技能行为称作百分百精确复刻。如果某个客户端版本中的骨骼/纹理命名变化，检查脚本会列出缺项，页面仍应使用公共回退素材而不是让单位消失。
 
-`py tools/check-assets.py --require-official` 用于本机素材齐全后的严格校验；`py tools/check-assets.py` 只要求公共资源完整。
+`py tools/check-assets.py --require-official` 用于本机素材齐全后的严格校验，并检查本机生成的干员目录；`py tools/check-assets.py` 只要求公共资源完整。
 
 ## 版权与边界
 
