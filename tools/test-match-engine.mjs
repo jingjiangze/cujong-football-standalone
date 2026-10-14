@@ -12,7 +12,7 @@ const roster = [
     defense:150, blockCount:2, range:2, attackInterval:1, redeploySeconds:20, initialSp:20, maxSp:30,
     skills:[{id:'push-weak',name:'弱推',spCost:5,initialSp:0,cooldownSeconds:10,effect:{type:'push',forceLevel:1}}] },
   { id:'test-guard', name:'测试近卫', profession:'guard', cost:15, attack:500, hp:1800,
-    defense:250, blockCount:3, range:1, attackInterval:1.2, redeploySeconds:25, initialSp:0, maxSp:30,
+    defense:250, blockCount:3, range:1, attackInterval:1.2, redeploySeconds:25, initialSp:10, maxSp:30,
     skills:[{id:'push-heavy',name:'重推',spCost:5,initialSp:0,cooldownSeconds:10,effect:{type:'push',forceLevel:2}}] },
 ];
 
