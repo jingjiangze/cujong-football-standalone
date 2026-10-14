@@ -58,14 +58,29 @@ def first_number(mapping, names, default=None):
 
 
 def latest_attributes(entry):
-    frames = entry.get("attributesKeyFrames") or entry.get("attributes_key_frames") or []
+    """Read the highest-level frame of the highest phase in an Arknights character table."""
     candidates = []
+    phases = entry.get("phases") or []
+    for phase_index, phase in enumerate(phases):
+        if not isinstance(phase, dict):
+            continue
+        frames = phase.get("attributesKeyFrames") or phase.get("attributes_key_frames") or []
+        for frame in frames:
+            data = frame.get("data") or frame.get("attributes") or {}
+            if isinstance(data, dict):
+                candidates.append((phase_index, number(frame.get("level"), 0), data))
+    if candidates:
+        return max(candidates, key=lambda row: (row[0], row[1]))[2]
+
+    # A few client versions flatten the final frame at the character root.
+    frames = entry.get("attributesKeyFrames") or entry.get("attributes_key_frames") or []
+    flattened = []
     for frame in frames:
         data = frame.get("data") or frame.get("attributes") or {}
         if isinstance(data, dict):
-            candidates.append((number(frame.get("level"), 0), data))
-    if candidates:
-        return max(candidates, key=lambda pair: pair[0])[1]
+            flattened.append((number(frame.get("level"), 0), data))
+    if flattened:
+        return max(flattened, key=lambda pair: pair[0])[1]
     return entry.get("attributes") or entry.get("stats") or {}
 
 
@@ -93,7 +108,7 @@ def guess_force_level(description, blackboard):
 
 def classify_skill(skill, skill_id):
     levels = skill.get("levels") or []
-    level = levels[0] if levels else skill
+    level = levels[-1] if levels else skill
     sp_data = level.get("spData") or level.get("sp_data") or {}
     blackboard_list = level.get("blackboard") or level.get("blackBoard") or []
     blackboard = {
@@ -134,7 +149,9 @@ def classify_skill(skill, skill_id):
         "spCost": max(1, round(sp_cost or 20)),
         "initialSp": max(0, round(initial_sp or 0)),
         "maxChargeTime": max(1, round(max_charge or 1)),
-        "cooldownSeconds": max(1, round(duration or 10)),
+        # In this engine the SP threshold is the charge gate; no separate invented
+        # duration-based cooldown is added on top of the original SP mechanics.
+        "cooldownSeconds": 0,
         "duration": max(0, duration or 0),
         "blackboard": blackboard,
         "effect": effect,
@@ -148,10 +165,10 @@ def convert_operator(operator_id, entry, skill_table):
     attrs = latest_attributes(entry)
     rarity_raw = first_number(entry, ("rarity",), 2)
     rarity = int(rarity_raw) + 1 if 0 <= rarity_raw <= 5 else int(rarity_raw)
-    cost = first_number(entry, ("cost", "deployCost", "initialCost", "costs"), None)
+    cost = first_number(attrs, ("cost", "deployCost", "initialCost", "deploy_cost"), None)
     if cost is None:
-        cost = first_number(attrs, ("cost", "deployCost", "initialCost"), 12)
-    attack_time = first_number(entry, ("baseAttackTime", "base_attack_time"), 1.5)
+        cost = first_number(entry, ("cost", "deployCost", "initialCost", "costs"), 12)
+    attack_time = first_number(attrs, ("baseAttackTime", "base_attack_time"), first_number(entry, ("baseAttackTime", "base_attack_time"), 1.5))
     if attack_time and attack_time > 0:
         attack_interval = round(float(attack_time), 3)
     else:
@@ -168,7 +185,7 @@ def convert_operator(operator_id, entry, skill_table):
     atk = first_number(max_attrs, ("atk", "attack", "attackPower"), first_number(entry, ("atk", "attack"), 300))
     defense = first_number(max_attrs, ("def", "defense", "defence"), first_number(entry, ("def", "defense"), 0))
     resistance = first_number(max_attrs, ("magicResistance", "magic_resistance", "res", "resistance"), first_number(entry, ("magicResistance", "resistance"), 0))
-    block_count = first_number(entry, ("blockCnt", "blockCount", "block_count"), first_number(max_attrs, ("blockCnt", "blockCount"), 1))
+    block_count = first_number(max_attrs, ("blockCnt", "blockCount", "block_count"), first_number(entry, ("blockCnt", "blockCount", "block_count"), 1))
     deploy_range = 2 if entry.get("rangeId") or entry.get("range_id") else 1
     redeploy_seconds = first_number(entry, ("redeployTime", "respawnTime", "redeploySeconds"), 70)
     initial_sp = max((skill.get("initialSp", 0) for skill in skill_defs), default=0)
