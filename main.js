@@ -2,9 +2,9 @@ import * as T from 'three';
 import { Grid } from './lib/grid.js';
 import { getBallProfile, getPushThreshold } from './lib/football-rules.mjs';
 import {
-  MATCH_STAGES, MATCH_STYLES, OPPONENT_TEAMS, createMatchState, deployOperator,
+  MATCH_STAGES, MATCH_STYLES, CARRIED_ITEMS, OPPONENT_TEAMS, createMatchState, deployOperator, deployCarriedItem,
   withdrawOperator, activateSkill, activateCarriedItem, startBattle, tickMatch,
-  restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, voteReady, computeMatchSummary,
+  restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, voteReady, requestCost, respondCostRequest, computeMatchSummary,
 } from './lib/football/match-engine.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -399,6 +399,9 @@ function applyCommand(ownerId,action,payload={}) {
     case 'withdraw': result=withdrawOperator(stateUi.match,payload.unitId);stateUi.match=result.state;if(result.ok)stateUi.selectedUnit=null;break;
     case 'skill': result=activateSkill(stateUi.match,payload.unitId,payload.skillIndex??0);stateUi.match=result.state;break;
     case 'item': result=activateCarriedItem(stateUi.match,ownerId);stateUi.match=result.state;break;
+    case 'itemDeploy': result=deployCarriedItem(stateUi.match,ownerId,payload.x,payload.y);stateUi.match=result.state;if(result.ok)stateUi.selectedBench=null;break;
+    case 'requestCost': result=requestCost(stateUi.match,ownerId);stateUi.match=result.state;break;
+    case 'respondCost': result=respondCostRequest(stateUi.match,ownerId,payload.accept===true);stateUi.match=result.state;break;
     case 'ready': stateUi.match=voteReady(stateUi.match,ownerId,payload.ready!==false);result={ok:true};break;
     case 'restart': result=restartBall(stateUi.match,ownerId,payload.x??(ownerId===0?1.4:11.6),payload.y??4.5);stateUi.match=result.state;break;
     case 'mark': stateUi.match=markCell(stateUi.match,ownerId,payload.x,payload.y);result={ok:true};break;
@@ -560,7 +563,8 @@ function renderBench() {
   const match=stateUi.match;if(!match)return;
   const bench=$('bench'),player=chosenPlayer();
   if(!player)return;
-  const signature=player.bench.map(item=>item.id+':'+(match.redeployRemaining[ownerUnitKey(stateUi.owner,item.id)]||0)).join('|')+';selected='+stateUi.selectedBench+';owner='+stateUi.owner;
+  const carry=CARRIED_ITEMS[MATCH_STYLES[match.styleId]?.itemId];
+  const signature=player.bench.map(item=>item.id+':'+Math.ceil(match.redeployRemaining[ownerUnitKey(stateUi.owner,item.id)]||0)).join('|')+';item='+carry?.id+':'+Math.ceil(player.itemCooldownRemaining||0)+';selected='+stateUi.selectedBench+';owner='+stateUi.owner;
   if(signature===bench.dataset.signature)return;
   bench.dataset.signature=signature;bench.innerHTML='';
   for(const operator of player.bench){
@@ -575,6 +579,22 @@ function renderBench() {
     card.addEventListener('click',()=>{
       stateUi.selectedBench=operator.id;stateUi.selectedUnit=null;renderPanels(true);
       toast('已选择 '+(operator.name||operator.id)+'，点击场地内格完成部署。');
+    });
+    bench.appendChild(card);
+  }
+  if(carry){
+    const card=document.createElement('button');card.type='button';
+    card.className='operator-card'+(stateUi.selectedBench==='__CARRIED_ITEM__'?' selected':'');
+    const icon=document.createElement('img');icon.className='role-icon';setIcon(icon,'item-'+carry.id);
+    const name=document.createElement('span');name.className='op-name';name.textContent=carry.label;
+    const meta=document.createElement('span');meta.className='op-meta';meta.textContent='携带物 · 不占部署位';
+    const cost=document.createElement('span');cost.className='op-cost';cost.textContent='C '+(carry.cost??5);
+    const cooldown=document.createElement('span');cooldown.className='op-meta cooldown';
+    cooldown.textContent=(player.itemCooldownRemaining||0)>0?('再部署 '+Math.ceil(player.itemCooldownRemaining)+'s'):'可部署';
+    card.append(icon,name,meta,cost,cooldown);
+    card.addEventListener('click',()=>{
+      stateUi.selectedBench='__CARRIED_ITEM__';stateUi.selectedUnit=null;renderPanels(true);
+      toast('已选择 '+carry.label+'，点击场地内格部署。');
     });
     bench.appendChild(card);
   }
@@ -608,7 +628,12 @@ function renderActionControls() {
     skill.append(skillIcon,document.createTextNode(unit.skills?.[0]?.name||'无技能'));
     withdraw.disabled=false;
   }else{
-    selected.textContent=stateUi.selectedBench?'已选择待部署干员：'+(stateUi.operators.find(x=>x.id===stateUi.selectedBench)?.name||stateUi.selectedBench)+'；点击格子部署。':'选择待部署干员，再点击蓝色方格部署；选择场上干员可用技能或撤退。';
+    if(stateUi.selectedBench==='__CARRIED_ITEM__'){
+      const carry=CARRIED_ITEMS[MATCH_STYLES[match.styleId]?.itemId];
+      selected.textContent='已选择携带物：'+(carry?.label||'携带物')+'；部署费用 '+(carry?.cost??5)+'，点击场地内格部署。';
+    }else{
+      selected.textContent=stateUi.selectedBench?'已选择待部署干员：'+(stateUi.operators.find(x=>x.id===stateUi.selectedBench)?.name||stateUi.selectedBench)+'；点击格子部署。':'选择待部署干员或携带物，再点击场地内格部署；选择场上干员可用技能或撤退。';
+    }
     skill.disabled=true;skill.textContent='释放技能';withdraw.disabled=true;
   }
   $('cost0').textContent='P1 费用 '+match.players[0].cost;
@@ -617,6 +642,14 @@ function renderActionControls() {
   $('readyButton').disabled=match.phase!=='deployment';
   $('pauseButton').textContent=match.paused?'恢复作战':'协同暂停';
   $('speedButton').textContent=match.speed===2?'恢复一倍速':'协同二倍速';
+  const request=match.pendingCostRequest;
+  const player=chosenPlayer();
+  $('requestCostButton').disabled=!!request||(player?.costRequestCooldown||0)>0||!player||player.cost>=99;
+  $('requestCostButton').textContent=(player?.costRequestCooldown||0)>0?'请求费用 '+Math.ceil(player.costRequestCooldown)+'s':'请求费用';
+  const canRespond=!!request&&request.responderId===stateUi.owner;
+  $('acceptCostButton').style.display=canRespond?'inline-block':'none';
+  $('declineCostButton').style.display=canRespond?'inline-block':'none';
+  $('acceptCostButton').textContent=canRespond?'同意划拨 '+Math.min(15,match.players[stateUi.owner]?.cost||0)+' 点':'同意费用请求';
   const restartVisible=match.ballInBench&&match.restart.ownerId===stateUi.owner&&match.restart.remaining>0;
   $('restartButton').style.display=restartVisible?'inline-block':'none';
 }
@@ -665,7 +698,9 @@ function animateFrame(now) {
 function tryDeployAtCell(cell) {
   if(!stateUi.match||!stateUi.selectedBench)return false;
   if(!canUseGridCell(cell.x,cell.y)){toast('不能在界外格部署。');return true;}
-  dispatch('deploy',{operatorId:stateUi.selectedBench,x:cell.x,y:cell.y});return true;
+  if(stateUi.selectedBench==='__CARRIED_ITEM__')dispatch('itemDeploy',{x:cell.x,y:cell.y});
+  else dispatch('deploy',{operatorId:stateUi.selectedBench,x:cell.x,y:cell.y});
+  return true;
 }
 renderer.domElement.addEventListener('pointerdown',event=>{
   if(!stateUi.match||$('pick').style.display!=='none')return;
@@ -682,7 +717,10 @@ $('pauseButton').addEventListener('click',()=>dispatch('pause',{paused:!stateUi.
 $('speedButton').addEventListener('click',()=>dispatch('speed',{fast:!stateUi.match?.speedVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
 $('skillButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('skill',{unitId:stateUi.selectedUnit,skillIndex:Number($('skillSelect').value||0)});});
 $('withdrawButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('withdraw',{unitId:stateUi.selectedUnit});});
-$('itemButton').addEventListener('click',()=>dispatch('item',{}));
+$('itemButton').addEventListener('click',()=>{stateUi.selectedBench='__CARRIED_ITEM__';stateUi.selectedUnit=null;renderPanels(true);toast('选择场地格部署携带物。');});
+$('requestCostButton').addEventListener('click',()=>dispatch('requestCost',{}));
+$('acceptCostButton').addEventListener('click',()=>dispatch('respondCost',{accept:true}));
+$('declineCostButton').addEventListener('click',()=>dispatch('respondCost',{accept:false}));
 $('restartButton').addEventListener('click',()=>dispatch('restart',{x:stateUi.owner===0?1.6:10.4,y:4.5}));
 $('startMatch').addEventListener('click',startFromSetup);
 function updateConnectionSetup() {
