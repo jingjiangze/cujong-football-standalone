@@ -35,6 +35,16 @@ renderer.setSize(window.innerWidth,window.innerHeight,false);
 renderer.outputColorSpace = T.SRGBColorSpace;
 renderer.domElement.style.background='transparent';
 host.appendChild(renderer.domElement);
+let pixiApp=null;
+const spineAssets=new Map(),spineUnits=new Map(),spinePending=new Set();
+if(window.PIXI&&window.PIXI.Application&&window.PIXI.spine){
+  try{
+    pixiApp=new PIXI.Application({resizeTo:window,backgroundAlpha:0,antialias:true,resolution:Math.min(2,window.devicePixelRatio||1)});
+    const pixiCanvas=pixiApp.canvas||pixiApp.view;
+    pixiCanvas.style.position='absolute';pixiCanvas.style.inset='0';pixiCanvas.style.pointerEvents='none';pixiCanvas.style.background='transparent';
+    host.appendChild(pixiCanvas);
+  }catch{pixiApp=null;}
+}
 
 const scene = new T.Scene();
 scene.background = null;
@@ -131,6 +141,17 @@ function parseSvgSymbolText(sheet,id) {
   const full='<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="'+viewBox+'">'+children+'</svg>';
   return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(full);
 }
+async function applyOfficialHudIfPresent() {
+  try{
+    const response=await fetch('/ui/football/hud_bg.png',{method:'HEAD'});
+    if(response.ok){
+      $('hud').style.backgroundImage='url(/ui/football/hud_bg.png)';
+      $('hud').style.backgroundSize='100% 100%';
+      $('hud').style.backgroundRepeat='no-repeat';
+      $('hud').style.borderColor='transparent';
+    }
+  }catch{}
+}
 async function loadPublicAssets() {
   try {
     const [manifestResponse,sheetResponse]=await Promise.all([
@@ -212,6 +233,49 @@ function createUnitMesh(unit) {
   group.userData={unitId:unit.id,base,body,head,weapon,halo,label,labelTex,animSeed:Math.random()*Math.PI*2};
   dynamicScene.add(group);return group;
 }
+async function ensureSpineForUnit(unit) {
+  if(!pixiApp||!window.PIXI?.spine?.Spine||spineUnits.has(unit.id)||spinePending.has(unit.id))return;
+  spinePending.add(unit.id);
+  try{
+    const operatorId=unit.operatorId;
+    const packageInfo=await (await fetch('/__chibi?dir='+encodeURIComponent(operatorId))).json();
+    if(packageInfo.missing||!packageInfo.skel||!packageInfo.atlas)return;
+    let data=spineAssets.get(operatorId);
+    if(!data){
+      const alias='football-spine-'+operatorId;
+      if(!PIXI.Assets.cache.has(alias)){
+        PIXI.Assets.add({alias,src:'/chibi/'+operatorId+'/'+packageInfo.skel,data:{spineAtlasFile:'/chibi/'+operatorId+'/'+packageInfo.atlas}});
+      }
+      const loaded=await PIXI.Assets.load(alias);
+      data=loaded.spineData||loaded;
+      spineAssets.set(operatorId,data);
+    }
+    const spine=new PIXI.spine.Spine(data);
+    const names=data.animations.map(animation=>animation.name);
+    const has=name=>names.includes(name);
+    const initial=has('Default')?'Default':names[0];
+    if(initial)spine.state.setAnimation(0,initial,true);
+    spine.tint=unit.team===1?0xffaaa4:(unit.ownerId===1?0xa8ebd8:0xb3d9ff);
+    pixiApp.stage.addChild(spine);
+    spineUnits.set(unit.id,{spine,natH:spine.height>1?spine.height:100,has,anim:initial,team:unit.team});
+  }catch{ /* The original generic unit mesh remains visible if official local assets are absent. */ }
+  finally{spinePending.delete(unit.id);}
+}
+function updateSpineUnit(unit,record) {
+  const screen=new T.Vector3(unit.x,.05,unit.y).project(camera);
+  record.spine.x=(screen.x*.5+.5)*window.innerWidth;
+  record.spine.y=(-screen.y*.5+.5)*window.innerHeight;
+  const distance=camera.position.distanceTo(new T.Vector3(unit.x,.05,unit.y));
+  const visibleWorldHeight=2*distance*Math.tan(camera.fov*Math.PI/360);
+  const desiredHeight=1.12*window.innerHeight/visibleWorldHeight;
+  const scale=desiredHeight/record.natH;
+  const sign=unit.team===1?(unit.x>stateUi.match.ball.x?-1:1):(stateUi.match.ball.x>unit.x?1:-1);
+  record.spine.scale.set(scale*sign,scale);
+  record.spine.visible=unit.alive!==false;
+  const desired=!unit.alive?'Die':unit.stunSeconds>0?'Stun':unit.attackCooldown<.13?'Attack':unit.team===1?'Move':'Default';
+  const clip=record.has(desired)?desired:(record.has('Default')?'Default':record.anim);
+  if(clip&&clip!==record.anim){record.anim=clip;record.spine.state.setAnimation(0,clip,clip==='Default'||clip==='Move'||clip==='Stun');}
+}
 function syncUnitMeshes() {
   const match=stateUi.match;if(!match)return;
   const units=[...(match.fieldUnits||[]),...(match.enemyUnits||[])];
@@ -223,7 +287,10 @@ function syncUnitMeshes() {
     const data=group.userData;
     const freshTint=roleTint(unit);
     data.base.material.color.setHex(freshTint);data.body.material.color.setHex(freshTint);
-    group.visible=unit.alive!==false;
+    if(!spineUnits.has(unit.id))void ensureSpineForUnit(unit);
+    const spineRecord=spineUnits.get(unit.id);
+    group.visible=unit.alive!==false&&!spineRecord;
+    if(spineRecord)updateSpineUnit(unit,spineRecord);
     group.position.set(unit.x,.04,unit.y);
     const focus=stateUi.selectedUnit===unit.id;
     data.halo.visible=focus;
@@ -632,6 +699,7 @@ window.__footballDebug={get state(){return stateUi.match;},get localOwner(){retu
 (async()=>{
   try{
     await loadPublicAssets();
+    await applyOfficialHudIfPresent();
     await loadOperatorCatalog();
   }catch(error){$('roomStatus').textContent='启动失败：'+error.message;}
   updateConnectionSetup();
