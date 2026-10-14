@@ -186,7 +186,7 @@ async def handle_message(websocket: Any, raw: str) -> None:
         await broadcast_room(room, {"type": "snapshot", "roomId": room_id, "state": state}, skip=websocket)
     elif kind == "command":
         action = str(message.get("action") or "")
-        if action not in {"deploy", "withdraw", "skill", "item", "ready", "restart", "mark", "pause", "speed"}:
+        if action not in {"deploy", "withdraw", "skill", "item", "itemDeploy", "requestCost", "respondCost", "ready", "restart", "mark", "pause", "speed"}:
             await send_json(websocket, {"type": "error", "message": "未允许的命令"})
             return
         command = {"type": "command", "roomId": room_id, "ownerId": owner_id,
