@@ -646,14 +646,21 @@ function renderUnitControls() {
 }
 function renderActionControls() {
   const match=stateUi.match,unit=chosenUnit();
-  const selected=$('selectedLabel'),skill=$('skillButton'),withdraw=$('withdrawButton');
+  const selected=$('selectedLabel'),skill=$('skillButton'),withdraw=$('withdrawButton'),skillSelect=$('skillSelect');
   if(!match)return;
   if(unit){
     selected.textContent=unit.name+'｜'+(roleName[unit.profession]||unit.profession)+'｜HP '+Math.max(0,Math.floor(unit.hp))+'/'+Math.floor(unit.maxHp)+'｜SP '+Math.floor(unit.sp)+'/'+unit.maxSp;
     skill.disabled=!unit.alive||!unit.skills?.length;
-    skill.innerHTML='';
-    const skillIcon=document.createElement('img');skillIcon.width=24;skillIcon.height=24;setIcon(skillIcon,iconName[unit.profession]||'role-specialist');
-    skill.append(skillIcon,document.createTextNode(unit.skills?.[0]?.name||'无技能'));
+    const previousSkill=Number(skillSelect.value||0);
+    skillSelect.innerHTML='';
+    (unit.skills||[]).forEach((entry,index)=>{
+      const option=document.createElement('option');option.value=String(index);
+      option.textContent=(index+1)+'. '+(entry.name||entry.id||'技能')+' · SP '+(entry.spCost??entry.costSP??20);
+      skillSelect.appendChild(option);
+    });
+    skillSelect.disabled=!unit.skills?.length;
+    skillSelect.value=String(Math.min(previousSkill,Math.max(0,(unit.skills||[]).length-1)));
+    skill.textContent='释放技能';
     withdraw.disabled=false;
   }else{
     if(stateUi.selectedBench==='__CARRIED_ITEM__'){
@@ -662,7 +669,7 @@ function renderActionControls() {
     }else{
       selected.textContent=stateUi.selectedBench?'已选择待部署干员：'+(stateUi.operators.find(x=>x.id===stateUi.selectedBench)?.name||stateUi.selectedBench)+'；点击格子部署。':'选择待部署干员或携带物，再点击场地内格部署；选择场上干员可用技能或撤退。';
     }
-    skill.disabled=true;skill.textContent='释放技能';withdraw.disabled=true;
+    skill.disabled=true;skill.textContent='释放技能';skillSelect.innerHTML='<option value="0">先选择场上干员</option>';skillSelect.disabled=true;withdraw.disabled=true;
   }
   $('cost0').textContent='P1 费用 '+match.players[0].cost;
   $('cost1').textContent='P2 费用 '+match.players[1].cost;
