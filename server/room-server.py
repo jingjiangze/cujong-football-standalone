@@ -46,7 +46,7 @@ ROOM_LOCK = asyncio.Lock()
 
 def sanitize_room_id(value: Any) -> str:
     text = str(value or "").strip().upper()
-    return "".join(char for char in text if char in ROOM_ALPHABET)[:40]
+    return "".join(char for char in text if char in ROOM_ALPHABET or char == "-")[:40]
 
 
 def sanitize_token(value: Any) -> str:
