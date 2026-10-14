@@ -1,5 +1,7 @@
 # 促融共竞阵地足球：审计与执行计划
 
+> **存档说明（2026-10-14 追加）**：本文件是 **2026-10-13 前后针对 PR #1 基线**（`fix/official-football-rules-base-movement`）的审计计划存档。其下 Phase A–G 的勾选框（`- [ ]`）反映的是**当时的计划**，不代表当前代码状态。当前进展请以 `docs/official-completion-plan.md` 为准，本文件**不再逐条更新**（不补勾选、不改结论、不改验收标准）。
+
 - 审计基线：`fix/official-football-rules-base-movement`，提交 `4c281836bebca76f96c4cbb95eb542a7074fe197`，PR #1
 - 目标：以官方「促融共竞」**阵地足球**的部署/作战/球场规则为主线；复用 Stronghold 的相机、网格、逐步运动与动作状态思路。不是给现有单人球类小游戏继续叠加近似规则。
 - 官方规则来源：
