@@ -69,7 +69,7 @@ def group_scene(UnityPy, AB: Path):
     n = 0
     jobs = [
         (AB / "arts/maps/multi_player/res.ab", None),
-        (AB / "activity/[uc]multiv3.ab", {"ground_base_tile", "land_poly_albedo"}),
+        (AB / "activity/[uc]multiv3.ab", {"ground_base_tile", "land_poly_albedo", "act3vmulti_entry_ground_atlas"}),
     ]
     for path, only in jobs:
         if not path.exists():
