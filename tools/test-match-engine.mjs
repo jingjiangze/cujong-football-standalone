@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MATCH_STAGES, MATCH_STYLES, OPPONENT_TEAMS, createMatchState,
-  deployOperator, withdrawOperator, activateSkill, activateCarriedItem,
-  startBattle, tickMatch, getStampCount, votePause, voteSpeed, restartBall,
+  deployOperator, withdrawOperator, activateSkill, activateCarriedItem, deployCarriedItem,
+  requestCost, respondCostRequest, startBattle, tickMatch, getStampCount, votePause, voteSpeed, restartBall,
 } from '../lib/football/match-engine.mjs';
 import { createBallState, canBlockBall, canDisplaceBall, applySkillDisplacement } from '../lib/football-rules.mjs';
 
@@ -40,14 +40,22 @@ test('players deploy from their bench and spend deployment cost', () => {
   assert.equal(duplicate.ok,false);
 });
 
-test('deployment item requires its own action; deploying an operator does not auto-trigger it', () => {
+test('carried item is a field deployment with cost 5, cooldown 60s, and a separate deploy slot', () => {
   let state=createMatchState({operators:roster,styleId:'anchoring'});
   state=deployOperator(state,0,'test-vanguard',3,3).state;
   assert.equal(state.activeEffects.length,0);
-  const activated=activateCarriedItem(state,0);
-  assert.equal(activated.ok,true);
-  assert.equal(activated.state.activeEffects.length,1);
-  assert.equal(activated.state.activeEffects[0].effect,'grant-barrier');
+  const costBefore=state.players[0].cost;
+  const deployed=deployCarriedItem(state,0,4,3);
+  assert.equal(deployed.ok,true);
+  state=deployed.state;
+  assert.equal(state.players[0].cost,costBefore-5);
+  assert.equal(state.fieldUnits.length,1);
+  assert.equal(state.deployedItems.length,1);
+  assert.equal(state.activeEffects.length,1);
+  assert.equal(state.activeEffects[0].effect,'grant-barrier');
+  assert.equal(state.fieldUnits[0].barrier,6000);
+  assert.equal(state.players[0].itemCooldownRemaining,60);
+  assert.equal(deployCarriedItem(state,0,5,3).reason,'item-cooldown');
 });
 
 test('weight-limited skill displacement fails without spending SP, then succeeds for enough force', () => {
@@ -110,4 +118,31 @@ test('football block and shift eligibility follow ball weight', () => {
   assert.equal(canBlockBall({role:'goalkeeper',blockCount:0,occupiedBlockCount:0},createBallState('standard')),true);
   assert.equal(canDisplaceBall(createBallState('heavy'),1),false);
   assert.equal(canDisplaceBall(createBallState('heavy'),2),true);
+});
+
+test('co-op cost requests transfer at most 15 DP and enforce a 15-second requester cooldown', () => {
+  let state=createMatchState({operators:roster});
+  const requested=requestCost(state,0);
+  assert.equal(requested.ok,true);
+  state=requested.state;
+  assert.equal(state.pendingCostRequest.amount,15);
+  const duplicate=requestCost(state,0);
+  assert.equal(duplicate.ok,false);
+  assert.equal(duplicate.reason,'cost-request-cooldown');
+  const accepted=respondCostRequest(state,1,true);
+  assert.equal(accepted.ok,true);
+  assert.equal(accepted.transferred,15);
+  assert.equal(accepted.state.players[0].cost,45);
+  assert.equal(accepted.state.players[1].cost,15);
+  assert.equal(accepted.state.pendingCostRequest,null);
+});
+
+test('a field-deployed goalkeeper does not consume normal deploy limit and both players defend the same goal', () => {
+  let state=createMatchState({operators:roster});
+  state.players[0].deployLimit=1;
+  const keeper=deployOperator(state,0,'test-guard',1,4);
+  assert.equal(keeper.ok,true);
+  assert.equal(keeper.state.fieldUnits[0].role,'goalkeeper');
+  const field=deployOperator(keeper.state,0,'test-vanguard',4,4);
+  assert.equal(field.ok,true);
 });
