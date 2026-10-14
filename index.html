@@ -43,7 +43,7 @@ button,input,select{font:inherit}button{border:1px solid #40566a;border-radius:7
 #pick{position:fixed;inset:0;z-index:30;display:flex;overflow:auto;flex-direction:column;align-items:center;justify-content:flex-start;padding:24px 14px 32px;gap:14px;background:rgba(6,12,19,.95);text-align:center}
 #pick h1{font-size:clamp(22px,3vw,34px);letter-spacing:1px;color:#f0b35d;margin:4px 0 0}
 #pick .subtitle{max-width:820px;margin:0;color:#b2c1cd;line-height:1.65}
-#setupGrid{display:grid;grid-template-columns:repeat(4,minmax(145px,1fr));gap:10px;width:min(900px,100%);text-align:left}
+#setupGrid{display:grid;grid-template-columns:repeat(5,minmax(135px,1fr));gap:10px;width:min(1000px,100%);text-align:left}
 .setup-field{display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid #304455;border-radius:8px;background:#111e2a}
 .setup-field label{font-size:11px;color:#a8b7c4}
 #rosterPick{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;width:min(1000px,100%)}
@@ -106,6 +106,7 @@ button,input,select{font:inherit}button{border:1px solid #40566a;border-radius:7
   <p class="subtitle">玩法内核：部署干员、费用增长、技力自然恢复、重量限制的位移带球、守门/阻挡、射门结算与携带物。默认使用仓库自带原创图标；本机提取的官方素材仅供个人客户端使用。</p>
   <div id="setupGrid">
     <div class="setup-field"><label for="stageSelect">比赛阶段</label><select id="stageSelect"><option value="training">训练场</option><option value="beginner" selected>初级赛</option><option value="advanced">高级赛</option><option value="elite">特级赛</option></select></div>
+    <div class="setup-field"><label for="rulesetSelect">规则版本</label><select id="rulesetSelect"><option value="classic" selected>促融共竞 #1（再部署减半）</option><option value="updated">后续阵地足球（再部署不减半）</option></select></div>
     <div class="setup-field"><label for="teamSelect">对手球队</label><select id="teamSelect"><option value="standard">标准队</option><option value="tactical">战术队</option><option value="loveBall">爱球会</option><option value="fairPlay">球德联</option></select></div>
     <div class="setup-field"><label for="ballType">足球规则</label><select id="ballType"><option value="standard">RMA70 刺球</option><option value="light">粉红绒气球</option><option value="heavy">压缩建材球</option><option value="explosive">高能源石球</option><option value="triple">至纯源石球</option><option value="bouncy">无垠回荡球</option><option value="leaking">漏气甲虫球</option><option value="inflating">膨胀甲虫球</option><option value="arctic">北境意志球</option><option value="slime">底海滑动球</option></select></div>
     <div class="setup-field"><label for="teamStyle">我方比赛风格</label><select id="teamStyle"><option value="basic">基础</option><option value="anchoring">驻场</option><option value="roaming">游走</option><option value="offensive">攻坚</option><option value="supportive">支援</option><option value="disabling">控制</option></select></div>
