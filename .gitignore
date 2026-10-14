@@ -9,3 +9,6 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# Locally extracted tables and generated operator catalog (do not commit)
+assets/local/
