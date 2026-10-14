@@ -2,7 +2,7 @@ import * as T from 'three';
 import { Grid } from './lib/grid.js';
 import { getBallProfile, getPushThreshold } from './lib/football-rules.mjs';
 import {
-  MATCH_STAGES, MATCH_STYLES, CARRIED_ITEMS, OPPONENT_TEAMS, createMatchState, deployOperator, deployCarriedItem,
+  MATCH_STAGES, MATCH_RULESETS, MATCH_STYLES, CARRIED_ITEMS, OPPONENT_TEAMS, createMatchState, deployOperator, deployCarriedItem,
   withdrawOperator, activateSkill, activateCarriedItem, startBattle, tickMatch,
   restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, voteReady, requestCost, respondCostRequest, computeMatchSummary,
 } from './lib/football/match-engine.mjs';
@@ -525,8 +525,8 @@ function initializeMatch() {
   const operators=selectedRosterFromUi();
   if(!operators.length){toast('至少选择一名干员');return;}
   const seed=Date.now()>>>0;
-  const stageId=$('stageSelect').value,styleId=$('teamStyle').value,ballType=$('ballType').value;
-  stateUi.match=createMatchState({stageId,styleId,ballType,operators,seed});
+  const stageId=$('stageSelect').value,styleId=$('teamStyle').value,ballType=$('ballType').value,rulesetId=$('rulesetSelect').value;
+  stateUi.match=createMatchState({stageId,styleId,ballType,rulesetId,operators,seed});
   stateUi.match.mode='two-player';
   stateUi.match.iceCells={};stateUi.match.slimeCells={};
   stateUi.match=chooseOpponentTeam(stateUi.match,$('teamSelect').value);
@@ -766,7 +766,11 @@ function updateConnectionSetup() {
 }
 $('connectionMode').addEventListener('change',updateConnectionSetup);
 $('stageSelect').addEventListener('change',()=>{
-  $('roomStatus').textContent=$('stageSelect').value==='elite'?'特级赛不套用技力需求 -20% 折扣；SP 自然回复仍按规则配置执行。':'选择阶段后会加载相应比赛时长、费用和技力参数。';
+  const elite=$('stageSelect').value==='elite';
+  const updated=$('rulesetSelect').value==='updated';
+  $('roomStatus').textContent=elite
+    ? (updated?'后续阵地足球：特级赛不享有技力需求 -20% 折扣；再部署时间不减半。':'旧版规则：特级赛仍按旧版技力折扣；再部署时间减半。')
+    : (updated?'后续阵地足球规则：再部署时间不减半；技能需求 -20%，技力自然回复 ×2。':'促融共竞 #1 规则：再部署时间减半；技能需求 -20%，技力自然回复 ×2。');
 });
 window.__footballDebug={get state(){return stateUi.match;},get localOwner(){return stateUi.localOwner;},deploy:(id,x,y)=>dispatch('deploy',{operatorId:id,x,y}),skill:(id,i=0)=>dispatch('skill',{unitId:id,skillIndex:i}),forceRender:()=>renderPanels(true)};
 (async()=>{
