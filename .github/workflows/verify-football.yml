@@ -25,3 +25,5 @@ jobs:
         run: node --input-type=module --check < main.js
       - name: Test football rules
         run: node --test tools/test-football-rules.mjs
+      - name: Validate distributable fallback assets
+        run: python tools/check-assets.py
