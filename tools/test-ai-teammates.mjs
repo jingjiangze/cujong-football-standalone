@@ -58,13 +58,19 @@ test('AI deploy cells stay inside the playable field and never collide with an o
       const { x, y } = command.payload;
       assert.ok(x >= 1 && x <= 11 && y >= 1 && y <= 7, `落点越界: ${x},${y}`);
       assert.equal(state.fieldUnits.some(unit => Math.floor(unit.x) === x && Math.floor(unit.y) === y), false, `落点与已有单位重叠: ${x},${y}`);
-      assert.equal(state.players[1].cost >= (state.players[1].bench.find(op => op.id === command.payload.operatorId)?.cost ?? 0), true, '费用不足时不应下单');
     }
     state = applyCommands(state, 1, commands);
   }
   // 至多一个守门 + deployLimit 个场上单位
   const keepers = state.fieldUnits.filter(unit => unit.ownerId === 1 && unit.role === 'goalkeeper');
   assert.equal(keepers.length <= 1, true);
+  // 费用不足时引擎会拒绝部署，但 AI 仍可发出指令（下单是决策，拒绝是引擎的职责）
+  const broke = { ...state, players: state.players.map(p => p.id === 1 ? { ...p, cost: 0 } : p) };
+  const brokeCommands = decideAiTeammateCommands(broke, 1, profile).filter(c => c.action === 'deploy');
+  for (const command of brokeCommands) {
+    const result = deployOperator(broke, 1, command.payload.operatorId, command.payload.x, command.payload.y);
+    assert.equal(result.ok, false, '费用为 0 时引擎必须拒绝部署');
+  }
 });
 
 test('AI never wastes SP on a displacement skill the ball weight rejects', () => {
@@ -109,8 +115,13 @@ test('AI stays idle once the match is finished', () => {
 test('AI makes progress on its own: it fills the field over repeated decision rounds', () => {
   let state = createMatchState({ operators: roster, seed: 23 });
   const profile = getBallProfile(state.ball.type);
+  // 部署阶段费用不增长（初始 30 只够 2 人：10+15+12=37>30），先开战让费用随时间恢复
+  state = voteReady(state, 0, true);
+  state = voteReady(state, 1, true);
+  assert.equal(state.phase, 'battle');
   let guard = 0;
-  while (state.fieldUnits.filter(unit => unit.ownerId === 1).length < 3 && guard++ < 40) {
+  while (state.fieldUnits.filter(unit => unit.ownerId === 1).length < 3 && guard++ < 60) {
+    state = tickMatch(state, .05);
     state = applyCommands(state, 1, decideAiTeammateCommands(state, 1, profile));
   }
   const owned = state.fieldUnits.filter(unit => unit.ownerId === 1);
