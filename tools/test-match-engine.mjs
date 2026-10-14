@@ -83,7 +83,7 @@ test('battle tick increases deployment cost and regenerates SP', () => {
   state=deployOperator(state,0,'test-vanguard',3,3).state;
   state=startBattle(state);
   const unitId=state.fieldUnits[0].id, cost=state.players[0].cost, sp=state.fieldUnits[0].sp;
-  state=tickMatch(state,2);
+  for(let i=0;i<20;i++)state=tickMatch(state,0.1);
   assert.ok(state.players[0].cost>cost);
   assert.ok(state.fieldUnits.find(x=>x.id===unitId).sp>sp);
   assert.ok(state.timeRemaining<300);
