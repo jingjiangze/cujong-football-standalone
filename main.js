@@ -1,1011 +1,618 @@
-// 促融共竞 · 阵地足球 —— 独立场景与玩法（v2：官方关卡布局 + 选1控1 + AI 队友）
-//
-// 复用卫戍协议框架：
-//   - lib/projection.js  官方相机模型（零依赖）
-//   - lib/grid.js        官方 SPFA 流场寻路（Grid.waypoints）—— AI 移动内核照上游范式
-//   - three + pixi-spine 3D 场景 / 小人叠层
-// 官方依据：
-//   - 关卡布局 data/level_act1multi_football.json（13×9；col0=allygoal / col12=enemygoal / row0,8=forbidden）
-//   - constData：maxPlayTime 300 / moveMultiplier 0.5 / initialCost 30 / costIncreaseTime 0.85
-//   - 视觉：官方预览图为灰白水泥板场地 + 青色发光边线 + 左蓝右红钢桁架球门（非绿茵场）
-
 import * as T from 'three';
-import { OFFICIAL_PARAMS, officialCamera, syncThreeCamera, pickTile } from './lib/projection.js';
 import { Grid } from './lib/grid.js';
-import { getBallProfile, getPushThreshold, createBallState, applyOperatorHit, advanceBallMotion } from './lib/football-rules.mjs';
+import { getBallProfile, getPushThreshold } from './lib/football-rules.mjs';
+import {
+  MATCH_STAGES, MATCH_STYLES, OPPONENT_TEAMS, createMatchState, deployOperator,
+  withdrawOperator, activateSkill, activateCarriedItem, startBattle, tickMatch,
+  restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, computeMatchSummary,
+} from './lib/football/match-engine.mjs';
 
-// ---------------- 官方关卡布局（data/level_act1multi_football.json 实测）----------------
-const LEVEL = {
-  cols: 13, rows: 9,            // mapData.map 实测：13 列 × 9 行
-  goalCols: 1,                  // col 0 = tile_allygoal，col 12 = tile_enemygoal
-  borderRows: 2,                // row 0 / row 8 = tile_forbidden
-};
-const COLS = LEVEL.cols, ROWS = LEVEL.rows;
-const X0 = 1, X1 = COLS - 2;    // 球场内区（含）1..11
-const Y0 = 1, Y1 = ROWS - 2;    // 1..7
-const CX = (X0 + X1) / 2, CY = (Y0 + Y1) / 2;
-
-const CFG = {
-  playTime: 300,                // official options.maxPlayTime
-  moveScale: 0.5,               // official options.moveMultiplier
-  squad: 3,                     // prototype: one controlled operator + two AI teammates
-  opRadius: 0.40,
-  opSpeed: 2.6,
-  aiSpeed: 2.2,
-  attackRange: 1.45,
-  attackInterval: 0.72,
-  attackDamage: 1200,            // normalized prototype value, not a claimed official operator stat
-  operatorHp: 12000,              // simplified health pool for showing ball impact/down states
-  downDuration: 15,               // prototype respite timer; not all operator-specific timings
-  ballHitCooldown: 0.7,
-  barrierAttackRange: 1.1,
-  ballR: 0.26,
-  barrierHp: 24000,              // normalized durability: two standard-ball impacts
-  resetAfterGoal: 1.4,
+const $ = (id) => document.getElementById(id);
+const stateUi = {
+  match:null, operators:[], selectedBench:null, selectedUnit:null, owner:0,
+  localOwner:0, online:false, host:false, socket:null, roomId:null,
+  lastBroadcast:0, lastDrawKey:'', iconUrls:{}, iconSheetText:null,
+  simAccumulator:0, previousFrame:performance.now(), running:false, loading:false,
+  chosenRoster:new Set(), lastError:null, lastEvents:[],
 };
 
-// 官方视觉（预览图实测）：浅灰水泥板 (155,153,161) / 板缝 (58,72,99) / 青色发光边线 / 左蓝右红钢桁架
-const VIS = {
-  slabA: 0xe2e1e7, slabB: 0xdad9e0, grout: 0x7d89a1,
-  cyan: 0x59d8e6, allyTruss: 0x2f6fe0, enemyTruss: 0xd23c2e,
-  standTop: 0x2f3542, standBottom: 0x3b4658,
-  barrier: 0xd9a441, ballWhite: 0xf4f6f4,
+const profileNames = {
+  standard:'RMA70 刺球',light:'粉红绒气球',heavy:'压缩建材球',explosive:'高能源石球',
+  triple:'至纯源石球',bouncy:'无垠回荡球',leaking:'漏气甲虫球',inflating:'膨胀甲虫球',
+  arctic:'北境意志球',slime:'底海滑动球',
 };
+const roleName = {
+  vanguard:'先锋',guard:'近卫',defender:'重装',sniper:'狙击',caster:'术师',medic:'医疗',supporter:'辅助',specialist:'特种',
+};
+const styleName = Object.fromEntries(Object.entries(MATCH_STYLES).map(([id,data])=>[id,data.label]));
+const teamName = Object.fromEntries(Object.entries(OPPONENT_TEAMS).map(([id,data])=>[id,data.label]));
+const iconName = { vanguard:'role-vanguard',guard:'role-guard',defender:'role-defender',sniper:'role-sniper',caster:'role-caster',medic:'role-medic',supporter:'role-supporter',specialist:'role-specialist' };
 
-// ---------------- three 场景 ----------------
-const host = document.getElementById('host');
-const renderer = new T.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+const host = $('host');
+const renderer = new T.WebGLRenderer({antialias:true,alpha:true,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(2,window.devicePixelRatio||1));
+renderer.setSize(window.innerWidth,window.innerHeight,false);
+renderer.outputColorSpace = T.SRGBColorSpace;
+renderer.domElement.style.background='transparent';
 host.appendChild(renderer.domElement);
-const scene = new T.Scene(); scene.background = new T.Color(0x1b2028);
-const cam3 = new T.PerspectiveCamera(40, 16 / 9, 0.5, 400);
-scene.add(new T.HemisphereLight(0xe8f0ff, 0x4b525c, 1.55));
-const dl = new T.DirectionalLight(0xffffff, 0.85); dl.position.set(6, 4, 18); scene.add(dl);
-const sceneTextureTargets = [];
 
-function box(w, h, d, color, x, y, z, o = {}) {
-  const m = new T.Mesh(new T.BoxGeometry(w, h, d),
-    new T.MeshStandardMaterial({ color, roughness: o.rough ?? 0.88, metalness: o.metal ?? 0.06,
-      emissive: o.emissive ?? 0x000000, emissiveIntensity: o.ei ?? 1 }));
-  m.position.set(x, y, z); scene.add(m); return m;
+const scene = new T.Scene();
+scene.background = null;
+const camera = new T.PerspectiveCamera(39,window.innerWidth/window.innerHeight,0.1,120);
+camera.position.set(7.5,15.8,17);
+camera.lookAt(6.5,0,4.5);
+scene.add(new T.HemisphereLight(0xe9f4ff,0x303d4c,2.1));
+const sun = new T.DirectionalLight(0xffffff,1.35);
+sun.position.set(4,12,9); scene.add(sun);
+const fill = new T.DirectionalLight(0x74d5ec,.45);
+fill.position.set(-7,7,-2); scene.add(fill);
+
+const raycaster = new T.Raycaster();
+const pointer = new T.Vector2();
+const tileMeshes = [];
+const tileTopMaterials = [];
+const staticScene = new T.Group(); scene.add(staticScene);
+const dynamicScene = new T.Group(); scene.add(dynamicScene);
+let ballMesh = null, ballArrow = null, barrierMeshes = new Map(), unitMeshes = new Map();
+let boardGrid = null;
+let officialGroundLoaded = false;
+
+function box(parent,w,h,d,color,x,y,z,materialOptions={}) {
+  const mesh = new T.Mesh(new T.BoxGeometry(w,h,d),new T.MeshStandardMaterial({
+    color,roughness:materialOptions.roughness??.82,metalness:materialOptions.metalness??.05,
+    transparent:materialOptions.transparent??false,opacity:materialOptions.opacity??1,
+  }));
+  mesh.position.set(x,y,z); parent.add(mesh); return mesh;
 }
-
-// 场地：浅灰水泥大板（板缝用深色细条表现）
-(() => {
-  const totalW = COLS, totalH = ROWS;
-  box(totalW, totalH, 0.12, VIS.grout, COLS / 2, ROWS / 2, -0.12, { rough: 1 });      // 板缝底
-  const SLAB = 1;                                                                     // 每格一块
-  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
-    if (r === 0 || r === ROWS - 1) continue;                                          // 界外行单独画
-    const inside = c >= X0 && c <= X1;
-    const color = c === 0 ? VIS.allyTruss : c === COLS - 1 ? VIS.enemyTruss
-      : (r + c) % 2 ? VIS.slabA : VIS.slabB;
-    box(SLAB - 0.045, SLAB - 0.045, 0.10, color, c + 0.5, r + 0.5, 0.0,
-      { rough: inside ? 0.96 : 0.7, metal: inside ? 0.02 : 0.25 });
-    if (inside) {
-      const topMaterial = new T.MeshStandardMaterial({ color, roughness: 0.96, metalness: 0.02 });
-      const top = new T.Mesh(new T.PlaneGeometry(SLAB - 0.045, SLAB - 0.045), topMaterial);
-      top.position.set(c + 0.5, r + 0.5, 0.056);
-      scene.add(top);
-      sceneTextureTargets.push(topMaterial);
-    }
-  }
-  // 上下两条看台（界外行）
-  for (const r of [0, ROWS - 1]) {
-    box(COLS, 1, 0.6, r === 0 ? VIS.standTop : VIS.standBottom, COLS / 2, r + 0.5, 0.18, { rough: 0.95 });
-    // 橙黑相间警示条纹（官方预览图的特征；原来是一根实心黄梁）
-    for (let i = 0; i < COLS * 3; i++) {
-      const orange = i % 2 === 0;
-      box(1 / 3 - 0.01, 0.12, 0.12, orange ? 0xe07a1f : 0x1d2024, i / 3 + 1 / 6,
-        r === 0 ? r + 0.96 : r + 0.04, 0.5, { emissive: orange ? 0x2a1400 : 0x000000 });
-    }
-  }
-  // 青色发光边线（官方预览图的标志性特征）
-  box(X1 - X0 + 1 + 0.2, 0.09, 0.09, VIS.cyan, CX, Y0 + 0.10, 0.15, { emissive: VIS.cyan, ei: 0.9 });   // 修复：原来在 y=Y0=1.0，正好嵌进看台盒子被吞掉
-  box(X1 - X0 + 1 + 0.2, 0.09, 0.09, VIS.cyan, CX, Y1 + 0.90, 0.15, { emissive: VIS.cyan, ei: 0.9 });   // 修复：原来埋在看台盒子里，看不见
-  // 中线 + 中圈
-  box(0.07, Y1 - Y0 + 1, 0.02, VIS.cyan, CX + 0.5, CY + 0.5, 0.075, { emissive: VIS.cyan, ei: 0.35 });
-  const ring = new T.Mesh(new T.RingGeometry(1.5, 1.58, 48),
-    new T.MeshBasicMaterial({ color: VIS.cyan, side: T.DoubleSide, transparent: true, opacity: 0.75 }));
-  ring.position.set(CX + 0.5, CY + 0.5, 0.075); scene.add(ring);
-
-  // 左右球门：钢桁架（镂空斜撑）
-  const truss = (baseX, color, dir) => {
-    const g = new T.Group();
-    const mat = new T.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.65, emissive: color, emissiveIntensity: 0.28 });
-    const bar = (w, h, d, x, y, z) => { const m = new T.Mesh(new T.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); g.add(m); };
-    bar(0.16, ROWS - 2, 0.16, 0, ROWS / 2, 0.9);                 // 竖框
-    bar(0.16, ROWS - 2, 0.16, dir * 0.75, ROWS / 2, 0.9);
-    bar(0.16, 0.16, 0.16, dir * 0.375, ROWS / 2, 0.9);           // 横撑
-    for (let i = 1; i < ROWS - 2; i += 1) {                       // 斜撑
-      const m = new T.Mesh(new T.BoxGeometry(0.1, 0.95, 0.1), mat);
-      m.position.set(dir * 0.375, i + 1, 0.9); m.rotation.x = 0.62; g.add(m);
-    }
-    bar(0.9, 0.14, 0.14, dir * 0.375, ROWS - 2, 0.9);            // 顶梁
-    g.position.set(baseX, 0, 0); scene.add(g);
-  };
-  truss(0.5, VIS.allyTruss, 1);
-  truss(COLS - 0.5, VIS.enemyTruss, -1);
-})();
-
-async function loadOfficialSceneSurfaceTexture() {
-  // Assets are extracted from the local client and deliberately ignored by Git.
-  // The app still works with the original procedural slabs when assets are absent.
-  for (const name of ['ground_base_tile', 'land_poly_albedo']) {
-    const url = `/ui/scene/${name}.png`;
-    try {
-      const response = await fetch(url, { method: 'HEAD' });
-      if (!response.ok) continue;
-      const texture = await new T.TextureLoader().loadAsync(url);
-      texture.colorSpace = T.SRGBColorSpace;
-      for (const material of sceneTextureTargets) {
-        material.map = texture;
-        material.needsUpdate = true;
-      }
-      return name;
-    } catch { /* no local official asset: use the safe procedural fallback */ }
-  }
-  return null;
+function makeTile(x,y,color,inside) {
+  const geom = new T.PlaneGeometry(.965,.965);
+  const mat = new T.MeshStandardMaterial({color,roughness:inside?.96:.8,metalness:inside?.02:.12});
+  const mesh = new T.Mesh(geom,mat);
+  mesh.rotation.x=-Math.PI/2; mesh.position.set(x+.5,.025,y+.5);
+  mesh.userData={gridX:x,gridY:y,kind:inside?'field':'border'};
+  staticScene.add(mesh); tileMeshes.push(mesh);
+  if(inside)tileTopMaterials.push(mat);
 }
-void loadOfficialSceneSurfaceTexture();
-
-// 足球：程序化生成（无可再分发的球体素材；本地纹理可选）
-function ballTexture() {
-  const s = 128, cv = document.createElement('canvas'); cv.width = cv.height = s;
-  const g = cv.getContext('2d');
-  g.fillStyle = '#f4f6f4'; g.fillRect(0, 0, s, s);
-  g.fillStyle = '#16181a';
-  const pent = (cx, cy, r, rot = 0) => {
-    g.beginPath();
-    for (let i = 0; i < 5; i++) {
-      const a = rot + i * Math.PI * 2 / 5 - Math.PI / 2;
-      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-      i ? g.lineTo(x, y) : g.moveTo(x, y);
-    }
-    g.closePath(); g.fill();
-  };
-  pent(s / 2, s / 2, s * 0.17);
-  for (let i = 0; i < 5; i++) {
-    const a = i * Math.PI * 2 / 5 - Math.PI / 2;
-    pent(s / 2 + Math.cos(a) * s * 0.36, s / 2 + Math.sin(a) * s * 0.36, s * 0.145, a);
-  }
-  const tex = new T.CanvasTexture(cv); tex.colorSpace = T.SRGBColorSpace; return tex;
+function addTruss(x,color,flip) {
+  const group=new T.Group(); group.position.set(x,0,0); staticScene.add(group);
+  const metal=new T.MeshStandardMaterial({color,metalness:.7,roughness:.35,emissive:color,emissiveIntensity:.16});
+  const bar=(w,h,d,bx,by,bz,rz=0)=>{const m=new T.Mesh(new T.BoxGeometry(w,h,d),metal);m.position.set(bx,by,bz);m.rotation.z=rz;group.add(m);};
+  bar(.13,5.3,.15,0,2.65,0);
+  bar(.13,5.3,.15,flip*.68,2.65,0);
+  bar(.13,.13,.15,flip*.34,5.25,0,0);
+  bar(.12,5.2,.14,flip*.34,2.65,0,flip*.24);
+  bar(.12,5.2,.14,flip*.34,2.65,0,-flip*.24);
+  return group;
 }
-const ball = new T.Mesh(new T.SphereGeometry(CFG.ballR, 26, 18),
-  new T.MeshStandardMaterial({ map: ballTexture(), roughness: 0.42, metalness: 0.05 }));
-ball.position.set(CX + 0.5, CY + 0.5, CFG.ballR); scene.add(ball);
-function setBallAppearance() {
-  const profile = getBallProfile(G.ball.type);
-  ball.material.color.setHex(profile.color ?? 0xf4f6f4);
-  syncBallMesh();
+function buildStaticScene() {
+  box(staticScene,13,.12,9,0x566474,6.5,-.18,4.5,{roughness:1});
+  for(let y=0;y<9;y++)for(let x=0;x<13;x++){
+    if(y===0||y===8){
+      makeTile(x,y,(x+y)%2?0x273647:0x304255,false);
+      box(staticScene,.32,.05,.09,(x%2)?0xe9a34d:0x121920,x+.5,.08,y+.08);
+    } else if(x===0||x===12) {
+      makeTile(x,y,x===0?0x244f8d:0x862d34,false);
+    } else {
+      makeTile(x,y,(x+y)%2?0xc5c9d0:0xd4d6db,true);
+    }
+  }
+  // Cyan pitch lines, centre circle, goal boxes.
+  const lineMat=new T.MeshStandardMaterial({color:0x45d9e8,emissive:0x21a4b5,emissiveIntensity:.55,roughness:.35});
+  const line=(w,d,x,z)=>{const m=new T.Mesh(new T.BoxGeometry(w,.025,d),lineMat);m.position.set(x,.085,z);staticScene.add(m);};
+  line(11,.045,6.5,1.13);line(11,.045,6.5,7.87);line(.045,6.75,6.5,4.5);line(.045,3,2,4.5);line(.045,3,11,4.5);
+  const circle=new T.Mesh(new T.TorusGeometry(1.05,.028,8,64),new T.MeshStandardMaterial({color:0x45d9e8,emissive:0x1eafbe,emissiveIntensity:.6}));
+  circle.rotation.x=Math.PI/2;circle.position.set(6.5,.1,4.5);staticScene.add(circle);
+  addTruss(.45,0x367dcb,1);addTruss(12.55,0xd84b4b,-1);
+  for(const x of [1.5,11.5]){
+    box(staticScene,1.6,.02,4.8,0x48cfdb,x,.075,4.5,{transparent:true,opacity:.28});
+  }
+  // Field border strips; the CSS SVG behind the transparent canvas is the full original fallback stadium.
+  line(12.8,.06,6.5,.13);line(12.8,.06,6.5,8.87);
+}
+buildStaticScene();
+
+function syncCamera() {
+  const aspect=window.innerWidth/window.innerHeight;
+  camera.aspect=aspect;
+  camera.position.set(6.5,aspect<.75?21:16,aspect<.75?21:16);
+  camera.lookAt(6.5,0,4.5);
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight,false);
+}
+window.addEventListener('resize',syncCamera);
+
+function parseSvgSymbolText(sheet,id) {
+  const parser=new DOMParser();
+  const doc=parser.parseFromString(sheet,'image/svg+xml');
+  const symbol=doc.getElementById(id);
+  if(!symbol)return null;
+  const viewBox=symbol.getAttribute('viewBox')||'0 0 96 96';
+  const children=symbol.innerHTML;
+  const full='<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="'+viewBox+'">'+children+'</svg>';
+  return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(full);
+}
+async function loadPublicAssets() {
+  try {
+    const [manifestResponse,sheetResponse]=await Promise.all([
+      fetch('/assets/public/manifest.json'),fetch('/assets/public/icons.svg')
+    ]);
+    if(!manifestResponse.ok||!sheetResponse.ok)throw new Error('公开回退素材缺失');
+    const manifest=await manifestResponse.json();
+    stateUi.iconSheetText=await sheetResponse.text();
+    stateUi.assetManifest=manifest;
+    const names=[];
+    (manifest.balls||[]).forEach(item=>names.push(item.icon.split('#').pop()));
+    (manifest.styles||[]).forEach(item=>{names.push(item.icon.split('#').pop());if(item.carriedItem)names.push(item.carriedItem.icon.split('#').pop());});
+    (manifest.roles||[]).forEach(item=>names.push(item.icon.split('#').pop()));
+    for(const id of new Set(names)){
+      const url=parseSvgSymbolText(stateUi.iconSheetText,id);
+      if(url)stateUi.iconUrls[id]=url;
+    }
+    $('roomStatus').textContent='回退素材已加载：10 种足球、6 种比赛风格/携带物、8 种职业图标。';
+    return manifest;
+  }catch(error){
+    $('roomStatus').textContent='资源清单载入失败：'+error.message+'；仍会使用内置形状回退。';
+    return null;
+  }
+}
+function setIcon(img,id) {
+  img.src=stateUi.iconUrls[id]||'';
+  if(!img.src)img.style.display='none';
+}
+function addLocalOfficialGroundTexture() {
+  const url='/ui/scene/ground_base_tile.png';
+  fetch(url,{method:'HEAD'}).then(response=>{
+    if(!response.ok)return;
+    return new T.TextureLoader().loadAsync(url);
+  }).then(texture=>{
+    if(!texture)return;
+    texture.colorSpace=T.SRGBColorSpace;texture.wrapS=texture.wrapT=T.RepeatWrapping;
+    texture.repeat.set(1,1);
+    for(const material of tileTopMaterials){material.map=texture;material.color.set(0xffffff);material.needsUpdate=true;}
+    officialGroundLoaded=true;
+    toast('已加载本机客户端地面贴图。');
+  }).catch(()=>{ /* The public original scene remains the fallback. */ });
+}
+addLocalOfficialGroundTexture();
+
+function createBallMesh() {
+  const geometry=new T.SphereGeometry(.26,24,18);
+  const material=new T.MeshStandardMaterial({color:0xf4f6f4,roughness:.42,metalness:.04});
+  ballMesh=new T.Mesh(geometry,material);dynamicScene.add(ballMesh);
+  const arrowMaterial=new T.MeshBasicMaterial({color:0xffd77d});
+  ballArrow=new T.ArrowHelper(new T.Vector3(1,0,0),new T.Vector3(0,.4,0),1.0,0xffd77d,.25,.15);
+  ballArrow.visible=false;dynamicScene.add(ballArrow);
+}
+createBallMesh();
+
+function roleTint(unit) {
+  if(unit.team===1)return 0xe45b55;
+  return unit.ownerId===1?0x55d4b8:0x67baf0;
+}
+function createUnitMesh(unit) {
+  const group=new T.Group();group.userData.unitId=unit.id;
+  const color=roleTint(unit);
+  const base=new T.Mesh(new T.CylinderGeometry(.27,.32,.11,18),new T.MeshStandardMaterial({color:color,metalness:.18,roughness:.48}));
+  base.position.y=.08;group.add(base);
+  const body=new T.Mesh(new T.CapsuleGeometry(.19,.48,4,8),new T.MeshStandardMaterial({color:color,roughness:.7}));
+  body.position.y=.48;group.add(body);
+  const head=new T.Mesh(new T.SphereGeometry(.16,14,10),new T.MeshStandardMaterial({color:0xe1d0bd,roughness:.7}));
+  head.position.set(0,.92,0);group.add(head);
+  const weapon=box(group,.08,.08,.42,0xdde5ed,0,.59,.29,{metalness:.65,roughness:.25});
+  weapon.rotation.x=-.25;
+  const halo=new T.Mesh(new T.RingGeometry(.29,.34,32),new T.MeshBasicMaterial({color:0xffdf83,side:T.DoubleSide,transparent:true,opacity:.85}));
+  halo.rotation.x=-Math.PI/2;halo.position.y=.13;halo.visible=false;group.add(halo);
+  const labelCanvas=document.createElement('canvas');labelCanvas.width=128;labelCanvas.height=64;
+  const ctx=labelCanvas.getContext('2d');ctx.fillStyle='#101923dd';ctx.fillRect(1,1,126,62);ctx.strokeStyle='#a6c7db';ctx.lineWidth=3;ctx.strokeRect(2,2,124,60);
+  ctx.fillStyle='#f3f7fa';ctx.font='bold 24px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(String(unit.name||unit.operatorId||'?').slice(0,5),64,32);
+  const labelTex=new T.CanvasTexture(labelCanvas);labelTex.colorSpace=T.SRGBColorSpace;
+  const label=new T.Sprite(new T.SpriteMaterial({map:labelTex,transparent:true,depthTest:false}));
+  label.position.set(0,1.42,0);label.scale.set(.95,.46,1);group.add(label);
+  group.userData={unitId:unit.id,base,body,head,weapon,halo,label,labelTex,animSeed:Math.random()*Math.PI*2};
+  dynamicScene.add(group);return group;
+}
+function syncUnitMeshes() {
+  const match=stateUi.match;if(!match)return;
+  const units=[...(match.fieldUnits||[]),...(match.enemyUnits||[])];
+  const active=new Set(units.map(unit=>unit.id));
+  for(const [id,group] of unitMeshes)if(!active.has(id)){dynamicScene.remove(group);group.traverse(obj=>{if(obj.geometry)obj.geometry.dispose();if(obj.material){if(Array.isArray(obj.material))obj.material.forEach(m=>m.dispose());else obj.material.dispose();}});unitMeshes.delete(id);}
+  for(const unit of units){
+    let group=unitMeshes.get(unit.id);
+    if(!group){group=createUnitMesh(unit);unitMeshes.set(unit.id,group);}
+    const data=group.userData;
+    const freshTint=roleTint(unit);
+    data.base.material.color.setHex(freshTint);data.body.material.color.setHex(freshTint);
+    group.visible=unit.alive!==false;
+    group.position.set(unit.x,.04,unit.y);
+    const focus=stateUi.selectedUnit===unit.id;
+    data.halo.visible=focus;
+    const target=unit.team===1?{x:1,y:4.5}:stateUi.match.ball;
+    const angle=Math.atan2(target.x-unit.x,target.y-unit.y);
+    group.rotation.y=angle;
+    const t=stateUi.match.elapsed||0;
+    group.position.y=.035+Math.sin(t*3.2+data.animSeed)*.027;
+    const attacking=unit.attackCooldown!==undefined&&unit.attackCooldown<.14&&unit.alive;
+    data.weapon.rotation.x=attacking?-.9+Math.sin(t*30)*.3:-.25;
+    if(unit.alive===false)group.scale.set(.85,.35,.85);else group.scale.set(1,1,1);
+  }
+}
+function syncBarrierMeshes() {
+  const match=stateUi.match;if(!match)return;
+  const active=new Set(match.barriers.map(x=>x.id));
+  for(const [id,mesh] of barrierMeshes)if(!active.has(id)){dynamicScene.remove(mesh);mesh.geometry.dispose();mesh.material.dispose();barrierMeshes.delete(id);}
+  for(const barrier of match.barriers){
+    let mesh=barrierMeshes.get(barrier.id);
+    if(!mesh){mesh=box(dynamicScene,.78,.65,.78,0xd5a447,barrier.x,.33,barrier.y,{metalness:.35,roughness:.42});barrierMeshes.set(barrier.id,mesh);}
+    mesh.position.set(barrier.x,.33,barrier.y);
+    const health=barrier.hp/barrier.maxHp;mesh.material.color.setHex(health>.66?0xd5a447:health>.33?0xc77c35:0xb94c42);
+  }
 }
 function syncBallMesh() {
-  const size = G.ball.sizeScale || 1;
-  ball.scale.setScalar(size);
-  ball.position.set(G.ball.x, G.ball.y, CFG.ballR * size);
+  const match=stateUi.match;if(!match)return;
+  const profile=getBallProfile(match.ball.type),size=match.ball.sizeScale||1;
+  ballMesh.material.color.setHex(profile.color||0xf4f6f4);
+  ballMesh.scale.setScalar(size);
+  ballMesh.position.set(match.ball.x,.28*size,match.ball.y);
+  const speed=Math.hypot(match.ball.vx,match.ball.vy);
+  if(speed>.08){
+    const direction=new T.Vector3(match.ball.vx,0,match.ball.vy).normalize();
+    ballArrow.position.set(match.ball.x,.12,match.ball.y);
+    ballArrow.setDirection(direction);ballArrow.setLength(Math.min(1.2,.4+speed*.2),.22,.13);ballArrow.visible=true;
+  }else ballArrow.visible=false;
 }
-function terrainKey(r, c) { return `${r}:${c}`; }
-function terrainFrictionAt(x, y) {
-  const key = terrainKey(tileR(y), tileC(x));
-  if (G.iceCells.has(key)) return 0.4;
-  if (G.slimeCells.has(key)) return 1.8;
-  return 1;
-}
-function markBallTerrainTrail() {
-  const profile = getBallProfile(G.ball.type);
-  const r = tileR(G.ball.y), c = tileC(G.ball.x);
-  if (r < Y0 || r > Y1 || c < X0 || c > X1) return;
-  const key = terrainKey(r, c);
-  if (profile.trail === 'ice' && !G.iceCells.has(key)) {
-    G.iceCells.add(key);
-    const mesh = new T.Mesh(new T.PlaneGeometry(0.92, 0.92),
-      new T.MeshBasicMaterial({ color: 0x83d9ff, transparent: true, opacity: 0.32, depthWrite: false }));
-    mesh.position.set(c + 0.5, r + 0.5, 0.066);
-    scene.add(mesh);
-  } else if (profile.trail === 'slime' && !G.slimeCells.has(key)) {
-    G.slimeCells.add(key);
-    const mesh = new T.Mesh(new T.PlaneGeometry(0.92, 0.92),
-      new T.MeshBasicMaterial({ color: 0x9bca8e, transparent: true, opacity: 0.28, depthWrite: false }));
-    mesh.position.set(c + 0.5, r + 0.5, 0.067);
-    scene.add(mesh);
+function refreshTerrainMeshes() {
+  const match=stateUi.match;if(!match)return;
+  const ice=match.iceCells||{},slime=match.slimeCells||{};
+  for(const key of Object.keys(ice).concat(Object.keys(slime))){
+    const [y,x]=key.split(':').map(Number),id='terrain:'+key;
+    if(barrierMeshes.has(id))continue;
+    const material=new T.MeshStandardMaterial({color:ice[key]?0x8edcff:0x9acb85,transparent:true,opacity:.27,roughness:.35});
+    const mesh=new T.Mesh(new T.PlaneGeometry(.9,.9),material);mesh.rotation.x=-Math.PI/2;mesh.position.set(x+.5,.07,y+.5);
+    dynamicScene.add(mesh);barrierMeshes.set(id,mesh);
   }
+}
+function pickTile(event) {
+  const rect=renderer.domElement.getBoundingClientRect();
+  pointer.x=((event.clientX-rect.left)/rect.width)*2-1;
+  pointer.y=-((event.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(pointer,camera);
+  const intersections=raycaster.intersectObjects(tileMeshes,false);
+  if(!intersections.length)return null;
+  const hit=intersections[0].object.userData;
+  return {x:hit.gridX,y:hit.gridY,kind:hit.kind};
 }
 
-
-// ---------------- 相机（沿用已验证的反解取景） ----------------
-let cam = null, camDebug = '';
-function cameraFor(pitch, H) {
-  const t = pitch * Math.PI / 180;
-  const cy = CY + 0.5 - H * Math.tan(t);
-  return officialCamera(`(0,${(cy - 4.19).toFixed(3)},${(7.76 - H).toFixed(3)},1)`,
-    { width: innerWidth, height: innerHeight }, { pitch });
-}
-function fitCamera() {
-  const w = innerWidth, h = innerHeight;
-  let best = null;
-  outer:
-  for (let pitch = 16; pitch <= 60; pitch += 2) {
-    for (let H = 8; H <= 90; H += 0.5) {
-      const c = cameraFor(pitch, H);
-      const ok = [[0, 0], [COLS, 0], [0, ROWS], [COLS, ROWS]]
-        .map(([x, y]) => c.project(x, y, 0))
-        .every(p => p.x > w * 0.02 && p.x < w * 0.98 && p.y > h * 0.10 && p.y < h * 0.95);
-      if (ok) { best = { c, H, pitch }; break outer; }
-    }
+const sceneGrid = (() => {
+  const rows=[];
+  for(let y=0;y<9;y++){
+    let row='';
+    for(let x=0;x<13;x++)row+=(y===0||y===8||x===0||x===12)?'h':'r';
+    rows.push(row);
   }
-  cam = best ? best.c : officialCamera(OFFICIAL_PARAMS.mid_battle_camera_param, { width: w, height: h });
-  camDebug = best ? `pitch=${best.pitch}° H=${best.H}` : 'fallback';
-  syncThreeCamera(cam, cam3, w, h);
-}
-function resize() { renderer.setSize(innerWidth, innerHeight, false); fitCamera(); }
-resize(); addEventListener('resize', resize);
-
-// ---------------- pixi 叠层 ----------------
-const app = new PIXI.Application({ resizeTo: window, backgroundAlpha: 0, antialias: true, resolution: Math.min(2, devicePixelRatio || 1) });
-app.view.style.position = 'absolute'; app.view.style.inset = '0';
-host.appendChild(app.view);
-
-// ---------------- 障碍（仿官方「随机阵地屏障」） ----------------
-const barriers = [];   // {r,c}
-function rollBarriers() {
-  barriers.length = 0;
-  const rnd = (n) => Math.floor(Math.random() * n);
-  for (const side of [1, 2]) {                       // 1 = 我方（左）门前, 2 = 敌方（右）门前
-    const col = side === 1 ? X0 + 1 : X1 - 1;
-    const used = new Set();
-    while (used.size < 3) used.add(Y0 + rnd(Y1 - Y0 + 1));
-    used.forEach(r => barriers.push({ r, c: col, hp: CFG.barrierHp, maxHp: CFG.barrierHp }));
-  }
-}
-function barrierMesh() {
-  const g = new T.Group();
-  for (const b of barriers) {
-    const m = new T.Mesh(new T.BoxGeometry(0.86, 0.86, 0.42),
-      new T.MeshStandardMaterial({ color: VIS.barrier, roughness: 0.5, metalness: 0.35, emissive: 0x3a2600 }));
-    m.position.set(b.c + 0.5, b.r + 0.5, 0.21); g.add(m);
-  }
-  return g;
-}
-let barrierGroup = null;
-function rebuildBarriers() {
-  if (barrierGroup) { scene.remove(barrierGroup); }
-  barrierGroup = barrierMesh(); scene.add(barrierGroup);
-  GRID = buildGrid();
-}
-
-// ---------------- 上游 Grid（AI 移动内核） ----------------
-let GRID = null;
-function buildGrid() {
-  const rows = [];
-  for (let r = 0; r < ROWS; r++) {
-    let line = '';
-    for (let c = 0; c < COLS; c++) {
-      const isWall = r === 0 || r === ROWS - 1 || c === 0 || c === COLS - 1
-        || barriers.some(b => b.r === r && b.c === c);
-      line += isWall ? 'h' : 'r';       // 'h' = HIGH/pass FLY ⇒ 地面不可走；'r' = 可走
-    }
-    rows.push(line);
-  }
-  return new Grid({ rows }, { r0: 0, r1: ROWS - 1, c0: 0, c1: COLS - 1 });
-}
-const walkable = (r, c) => GRID.groundPassable(r, c);
-// ⚠ 格 r 覆盖 y ∈ [r, r+1)，格心在 r+0.5 —— 由世界坐标取格必须用 floor，
-//   用 Math.round 会把格心 (r+0.5) 判成 r+1，整体错一格导致航路第一段就撞墙、AI 冻结。
-const tileR = (y) => Math.floor(y);
-const tileC = (x) => Math.floor(x);
-/** 最近的可行走格（起点被屏障占住时用；否则 waypoints 会判「不可达」直接返回 null） */
-function nearestFree(r0, c0) {
-  const r = Math.round(r0), c = Math.round(c0);       // ⚠ 必须取整：小数索引会让 tiles[] 取到 undefined
-  if (walkable(r, c)) return { r, c };
-  for (let rad = 1; rad <= 5; rad++) {
-    for (let dr = -rad; dr <= rad; dr++) for (let dc = -rad; dc <= rad; dc++) {
-      const rr = r + dr, cc = c + dc;
-      if (walkable(rr, cc)) return { r: rr, c: cc };
-    }
-  }
-  return null;
-}
-
-// ---------------- 小人 ----------------
-const ROSTER = ['002_amiya', '003_kalts', '009_12fce', '010_chen', '102_texas', '101_sora'];
-const actors = [];
-async function loadChibi(id, team) {
-  const list = await (await fetch('/__chibi?dir=' + encodeURIComponent(id))).json();
-  if (!list.skel) throw new Error('no skel ' + id);
-  const base = '/chibi/' + id + '/', alias = 'c_' + id + '_' + team;
-  PIXI.Assets.add({ alias, src: base + list.skel, data: { spineAtlasFile: base + list.atlas } });
-  const loaded = await PIXI.Assets.load(alias);
-  const data = loaded.spineData || loaded;
-  const sp = new PIXI.spine.Spine(data);
-  sp.scale.set(1, 1);
-  const natH = sp.height > 1 ? sp.height : 100;
-  const names = data.animations.map(a => a.name);
-  const has = (n) => names.includes(n);
-  sp.state.setAnimation(0, has('Default') ? 'Default' : names[0], true);
-  sp.tint = team === 0 ? 0xa8d8ff : 0xffb3a7;
-  app.stage.addChild(sp);
-  return { id, team, sp, natH, has, anim: has('Default') ? 'Default' : names[0],
-    x: 0, y: 0, route: null, legVer: -1, target: null, goal: null,
-    facing: team === 0 ? 1 : -1, role: 'field', attackCd: 0,
-    attackDamage: CFG.attackDamage, animHold: null,
-    maxHp: CFG.operatorHp, hp: CFG.operatorHp, downFor: 0, stunnedFor: 0,
-    ballHitCd: 0, barrierAttackCd: 0 };
-}
-function setAnim(a, name, loop) {
-  if (!a.has(name) || a.anim === name) return;
-  a.anim = name; a.sp.state.setAnimation(0, name, loop);
-}
-
-// ---------------- 比赛状态 ----------------
-const STYLE_LABELS = Object.freeze({
-  basic: '基础', anchoring: '锚定', offensive: '进攻',
-  roaming: '游走', supportive: '辅助', disabling: '制约',
-});
-const G = {
-  ball: createBallState('standard', CX + 0.5, CY + 0.5),
-  score: { ally: 0, enemy: 0 },
-  t: CFG.playTime, over: false, pause: 0, log: [],
-  controlled: 0,
-  style: 'basic',
-  joy: { x: 0, y: 0 },
-  restartTeam: null,
-  restartWindow: 0,
-  iceCells: new Set(),
-  slimeCells: new Set(),
-};
-const logf = (m) => { G.log.push(m); if (G.log.length > 6) G.log.shift(); hudSide(); };
-function hudSide() {
-  const el = document.getElementById('side');
-  if (!el) return;
-  const profile = getBallProfile(G.ball.type);
-  el.textContent =
-    `相机 ${camDebug}｜行动模式：摇杆 / WASD，1–3 切换\n` +
-    `球速 ${Math.hypot(G.ball.vx, G.ball.vy).toFixed(2)}｜${profile.label} 蓄积伤害 ${Math.round(G.ball.damage)}/${getPushThreshold(G.ball)}\n` +
-    `当前操作：${ROSTER[G.controlled] || '-'}｜风格：${STYLE_LABELS[G.style] || G.style}\n` + G.log.join('\n');
-}
-
-function resetPositions() {
-  const mine = actors.filter(a => a.team === 0), foes = actors.filter(a => a.team === 1);
-  const place = (a, r, c) => {
-    const f = nearestFree(r, c);
-    a.x = (f ? f.c : c) + 0.5;
-    a.y = (f ? f.r : r) + 0.5;
-  };
-  mine.forEach((a, i) => {
-    a.role = i === mine.length - 1 ? 'goalkeeper' : 'field';
-    place(a, a.role === 'goalkeeper' ? Math.round(CY) : Y0 + 1 + i * 2, a.role === 'goalkeeper' ? X0 : X0 + 2 + i);
-  });
-  foes.forEach((a, i) => {
-    a.role = i === foes.length - 1 ? 'goalkeeper' : 'field';
-    place(a, a.role === 'goalkeeper' ? Math.round(CY) : Y0 + 1 + i * 2, a.role === 'goalkeeper' ? X1 : X1 - 2 - i);
-  });
-  for (const a of actors) {
-    a.route = null; a.target = null; a.goal = null;
-    a.attackCd = 0; a.animHold = null;
-    a.hp = a.maxHp; a.downFor = 0; a.stunnedFor = 0;
-    a.ballHitCd = 0; a.barrierAttackCd = 0;
-  }
-  Object.assign(G.ball, createBallState(G.ball.type || 'standard', CX + 0.5, CY + 0.5));
-  G.restartTeam = null;
-  G.restartWindow = 0;
-  G.joy = { x: 0, y: 0 };
-  resetJoystickVisual();
-  syncBallMesh();
-}
-
-function styleProgress() {
-  return Math.max(0, Math.min(1, (CFG.playTime - G.t) / CFG.playTime));
-}
-function operatorAttackDamage(actor) {
-  let damage = actor.attackDamage;
-  if (actor.team !== 0) return damage;
-  if (G.style === 'basic') damage *= 1.1;
-  else if (G.style === 'anchoring') damage *= 1 + 0.6 * styleProgress();
-  else if (G.style === 'supportive') damage *= 0.9;
-  return Math.round(damage);
-}
-function operatorAttackInterval(actor) {
-  return actor.team === 0 && G.style === 'offensive'
-    ? CFG.attackInterval / 1.2
-    : CFG.attackInterval;
-}
-function aStyleDisablingTarget(target) {
-  const hitter = actors.find(a => a.id === G.ball.lastHitBy);
-  return hitter?.team === 0 && target.team === 1 && G.style === 'disabling' ? 2.5 : 1;
-}
-function ballImpactDamage(target, baseDamage) {
-  let damage = baseDamage;
-  const hitter = actors.find(a => a.id === G.ball.lastHitBy);
-  if (hitter?.team === 0 && target.team === 1) {
-    if (G.style === 'supportive') damage *= 0.9;
-    if (G.style === 'disabling' && target.stunnedFor <= 0) damage *= 0.85;
-  }
-  if (target.team === 0 && G.style === 'offensive') damage *= 1.2;
-  return Math.max(1, Math.round(damage));
-}
-
-function goal(side) {
-  const points = getBallProfile(G.ball.type).scoreMultiplier || 1;
-  if (side > 0) { G.score.ally += points; sfx('win'); logf(points > 1 ? `我方进球 +${points}` : '我方进球'); }
-  else { G.score.enemy += points; sfx('lose'); logf(points > 1 ? `敌方进球 +${points}` : '敌方进球'); }
-  G.pause = CFG.resetAfterGoal;
-  G.restartTeam = null;
-  G.restartWindow = 0;
-  rollBarriers(); rebuildBarriers();
-  resetPositions();
-  updateHud();
-}
-function updateHud() {
-  const allyScore = document.getElementById('scoreAlly');
-  const enemyScore = document.getElementById('scoreEnemy');
-  if (allyScore) allyScore.textContent = String(G.score.ally);
-  if (enemyScore) enemyScore.textContent = String(G.score.enemy);
-  const c = document.getElementById('clock');
-  if (c) c.textContent = `${String(Math.floor(Math.max(0, G.t) / 60)).padStart(2, '0')}:${String(Math.floor(Math.max(0, G.t) % 60)).padStart(2, '0')}`;
-
-  const sw = document.getElementById('switcher');
-  if (sw) {
-    const mine = actors.filter(a => a.team === 0);
-    const signature = mine.map(a => a.id).join('|') + ':' + G.controlled;
-    if (sw.dataset.signature !== signature) {
-      sw.dataset.signature = signature;
-      sw.innerHTML = mine.map((a, i) =>
-        `<button data-i="${i}" class="${i === G.controlled ? 'on' : ''}">${i + 1}·${a.id.replace(/^\d+_/, '')}</button>`
-      ).join('');
-      sw.querySelectorAll('button').forEach(b => b.onclick = () => {
-        G.controlled = Math.min(Math.max(0, +b.dataset.i), Math.max(0, mine.length - 1));
-        updateHud();
-      });
-    }
-  }
-
-  const restart = document.getElementById('restart');
-  if (restart) {
-    restart.hidden = !(G.restartWindow > 0 && G.restartTeam === 0);
-    restart.textContent = `重新开球（${Math.ceil(G.restartWindow)}）`;
-  }
-  hudSide();
-}
-// ---------------- 音效 ----------------
-const AC = window.AudioContext ? new (window.AudioContext)() : null;
-const bufCache = {};
-async function preloadSfx() {
-  if (!AC) return;
-  for (const [k, f] of [['win', 'ui/audio/act1multi_b_ui_winscore.wav'], ['lose', 'ui/audio/act1multi_b_ui_losescore.wav']]) {
-    try { const r = await fetch(f); bufCache[k] = await AC.decodeAudioData(await r.arrayBuffer()); } catch { }
-  }
-}
-function sfx(k) { if (!AC || !bufCache[k]) return; const s = AC.createBufferSource(); s.buffer = bufCache[k]; s.connect(AC.destination); s.start(); }
-
-// ---------------- 行动模式：摇杆连续移动 + WASD / 方向键 ----------------
-const heldKeys = new Set();
-const joyRoot = document.getElementById('joystick');
-const joyKnob = document.getElementById('joystickKnob');
-let joyPointer = null;
-const JOY_RADIUS = 39;
-
-function resetJoystickVisual() {
-  if (joyKnob) joyKnob.style.transform = 'translate(0px, 0px)';
-}
-function setJoystickFromPointer(e) {
-  if (!joyRoot || !joyKnob) return;
-  const rect = joyRoot.getBoundingClientRect();
-  let dx = e.clientX - (rect.left + rect.width / 2);
-  let dy = e.clientY - (rect.top + 56);
-  const length = Math.hypot(dx, dy);
-  if (length > JOY_RADIUS) { dx = dx / length * JOY_RADIUS; dy = dy / length * JOY_RADIUS; }
-  G.joy = { x: dx / JOY_RADIUS, y: dy / JOY_RADIUS };
-  joyKnob.style.transform = `translate(${dx}px, ${dy}px)`;
-}
-if (joyRoot) {
-  joyRoot.addEventListener('pointerdown', e => {
-    e.preventDefault();
-    joyPointer = e.pointerId;
-    joyRoot.setPointerCapture?.(e.pointerId);
-    setJoystickFromPointer(e);
-  });
-  joyRoot.addEventListener('pointermove', e => {
-    if (joyPointer === e.pointerId) { e.preventDefault(); setJoystickFromPointer(e); }
-  });
-  const releaseJoy = e => {
-    if (joyPointer === e.pointerId) {
-      joyPointer = null; G.joy = { x: 0, y: 0 }; resetJoystickVisual();
-    }
-  };
-  joyRoot.addEventListener('pointerup', releaseJoy);
-  joyRoot.addEventListener('pointercancel', releaseJoy);
-  joyRoot.addEventListener('lostpointercapture', () => {
-    joyPointer = null; G.joy = { x: 0, y: 0 }; resetJoystickVisual();
-  });
-}
-function movementInput() {
-  let x = G.joy.x, y = G.joy.y;
-  if (heldKeys.has('a') || heldKeys.has('arrowleft')) x -= 1;
-  if (heldKeys.has('d') || heldKeys.has('arrowright')) x += 1;
-  if (heldKeys.has('w') || heldKeys.has('arrowup')) y -= 1;
-  if (heldKeys.has('s') || heldKeys.has('arrowdown')) y += 1;
-  const length = Math.hypot(x, y);
-  if (length > 1) { x /= length; y /= length; }
-  return { x, y, active: length > 0.08 };
-}
-function moveByInput(a, input, speed, dt) {
-  if (!input.active) return false;
-  // Invert the current perspective projection so joystick direction is field-relative.
-  const p = cam.project(a.x, a.y, 0);
-  const px = cam.project(a.x + 1, a.y, 0);
-  const py = cam.project(a.x, a.y + 1, 0);
-  const sxX = px.x - p.x, syX = px.y - p.y;
-  const sxY = py.x - p.x, syY = py.y - p.y;
-  const det = sxX * syY - sxY * syX;
-  let wx = input.x, wy = input.y;
-  if (Math.abs(det) > 1e-6) {
-    wx = (input.x * syY - sxY * input.y) / det;
-    wy = (sxX * input.y - input.x * syX) / det;
-  }
-  const length = Math.hypot(wx, wy) || 1;
-  wx /= length; wy /= length;
-  const nx = a.x + wx * speed * dt, ny = a.y + wy * speed * dt;
-  const clear = (x, y) => walkable(tileR(y), tileC(x))
-    && !barriers.some(b => Math.abs(x - (b.c + 0.5)) < 0.54 && Math.abs(y - (b.r + 0.5)) < 0.54);
-  let moved = false;
-  if (clear(nx, a.y)) { a.x = nx; moved = true; }
-  if (clear(a.x, ny)) { a.y = ny; moved = true; }
-  if (moved) {
-    a.route = null; a.target = null; a.goal = null;
-    if (Math.abs(wx) > 0.08) a.facing = Math.sign(wx);
-  }
-  return moved;
-}
-function switchControlled(i) {
-  const count = actors.filter(a => a.team === 0).length;
-  if (!count) return;
-  G.controlled = ((i % count) + count) % count;
-  updateHud();
-}
-addEventListener('keydown', e => {
-  const key = e.key.toLowerCase();
-  if (['arrowleft','arrowright','arrowup','arrowdown',' '].includes(key)) e.preventDefault();
-  if (key === 'tab') {
-    e.preventDefault(); switchControlled(G.controlled + 1); return;
-  }
-  if (/^[1-3]$/.test(key)) {
-    const index = Number(key) - 1;
-    if (index < actors.filter(a => a.team === 0).length) switchControlled(index);
-  }
-  if (['a','d','w','s','arrowleft','arrowright','arrowup','arrowdown'].includes(key)) heldKeys.add(key);
-});
-addEventListener('keyup', e => heldKeys.delete(e.key.toLowerCase()));
-addEventListener('blur', () => {
-  heldKeys.clear(); G.joy = { x: 0, y: 0 }; resetJoystickVisual();
-});
-
-function restartBall(team = G.restartTeam) {
-  if (team !== 0 && team !== 1) return;
-  G.ball.x = team === 0 ? X0 + 1.45 : X1 - 1.45;
-  G.ball.y = Math.max(Y0 + 0.35, Math.min(Y1 + 0.65, G.ball.y));
-  G.ball.vx = 0; G.ball.vy = 0; G.ball.damage = 0; G.ball.barrierContact = null;
-  G.restartWindow = 0; G.restartTeam = null; G.pause = 0.25;
-  logf(team === 0 ? '我方重新开球' : '对方重新开球');
-  updateHud();
-}
-document.getElementById('restart')?.addEventListener('click', () => restartBall(0));
-
-// ---------------- AI（照上游范式：流场航路点逐段推进 + 每步校验 + 版本失效重规划） ----------------
-function moveAlong(a, targetRC, speed, dt) {
-  let sr = tileR(a.y), sc = tileC(a.x);
-  if (!walkable(sr, sc)) {
-    const f = nearestFree(sr, sc);
-    if (f) { sr = f.r; sc = f.c; a.route = null; a.goal = null; }
-  }
-  if (!a.route || a.legVer !== GRID.version || !a.goal || a.goal.r !== targetRC.r || a.goal.c !== targetRC.c) {
-    const wp = GRID.waypoints(sr, sc, targetRC.r, targetRC.c, { ignoreObstacles: false });
-    if (!wp) return false;
-    a.route = wp.slice(1).length ? wp.slice(1) : wp;
-    a.legVer = GRID.version; a.goal = targetRC;
-  }
-  let budget = speed * dt, guard = 8;
-  while (budget > 1e-9 && a.route.length && guard-- > 0) {
-    const [tr, tc] = a.route[0];
-    const dx = (tc + 0.5) - a.x, dy = (tr + 0.5) - a.y, d = Math.hypot(dx, dy);
-    if (Math.abs(dx) > 0.02) a.facing = Math.sign(dx);
-    if (d <= budget) {
-      a.x = tc + 0.5; a.y = tr + 0.5; budget -= d; a.route.shift(); continue;
-    }
-    const nx = a.x + dx / d * budget, ny = a.y + dy / d * budget;
-    if (!walkable(tileR(ny), tileC(nx))) break;
-    a.x = nx; a.y = ny; budget = 0;
-  }
-  if (a.route.length === 0) a.route = null;
-  return true;
-}
-
-// 战术层（上游只有「敌人 AI 的运动内核」可抄，战术选择无现成范式 ⇒ 按同一结构自写）：
-//   - 每队只有「离球最近的 1 人」去抢球，且先站到球的进攻反侧（那边才能把球推向对方门）
-//   - 其余人保持队形：一人守自家门前列、其余占中场支援位
-//   依据：实测「全队同构追球」会让两队挤成一坨互相抵消，60 秒零进球
-function teamStep(list, dt, opts) {
-  const B = G.ball;
-  const { attackDir, ownX } = opts;
-  if (!list.length) return;
-  const active = list.filter(a => a.downFor <= 0 && a.stunnedFor <= 0);
-  const fieldPlayers = active.filter(a => a.role !== 'goalkeeper');
-  const candidates = fieldPlayers.length ? fieldPlayers : active;
-  let chaser = null, best = Infinity;
-  for (const a of candidates) {
-    const d = Math.hypot(a.x - B.x, a.y - B.y);
-    if (d < best) { best = d; chaser = a; }
-  }
-  list.forEach((a, i) => {
-    if (a.downFor > 0) { if (a.has('Die')) setAnim(a, 'Die', false); return; }
-    if (a.stunnedFor > 0) { setAnim(a, a.has('Stun') ? 'Stun' : 'Default', true); return; }
-    let tr, tc;
-    if (a.role === 'goalkeeper') {
-      tc = ownX;
-      tr = tileR(B.y);
-    } else if (a === chaser) {
-      tc = tileC(B.x) + (attackDir > 0 ? -1 : 1);
-      tr = tileR(B.y);
-    } else {
-      const fieldIndex = fieldPlayers.indexOf(a);
-      tc = tileC((B.x + ownX) / 2);
-      tr = tileR(B.y) + (fieldIndex % 2 ? 2 : -2);
-    }
-    tc = Math.max(X0, Math.min(X1, tc));
-    tr = Math.max(Y0, Math.min(Y1, tr));
-    if (!walkable(tr, tc)) {
-      const f = nearestFree(tr, tc);
-      if (f) { tr = f.r; tc = f.c; }
-    }
-    const moved = moveAlong(a, { r: tr, c: tc }, CFG.aiSpeed * CFG.moveScale, dt);
-    if (!(a.animHold > 0)) setAnim(a, moved ? 'Move' : 'Default', true);
-  });
-}
-
-function downActor(a, cause = '足球冲击') {
-  if (a.downFor > 0) return;
-  a.hp = 0;
-  const downMultiplier = a.team !== 0 ? 1 : G.style === 'roaming' ? 0.8 : G.style === 'anchoring' ? 1.15 : 1;
-  a.downFor = CFG.downDuration * downMultiplier;
-  a.stunnedFor = 0;
-  a.route = null; a.target = null; a.goal = null; a.animHold = null;
-  setAnim(a, a.has('Die') ? 'Die' : 'Default', false);
-  logf(`${a.id.replace(/^\d+_/, '')} 被${cause}击倒，进入喘息状态 ${a.downFor} 秒`);
-}
-function respawnActor(a) {
-  const team = actors.filter(x => x.team === a.team);
-  const index = Math.max(0, team.indexOf(a));
-  const row = a.role === 'goalkeeper' ? Math.round(CY) : Y0 + 1 + ((index * 2) % (Y1 - Y0 + 1));
-  const col = a.role === 'goalkeeper'
-    ? (a.team === 0 ? X0 : X1)
-    : (a.team === 0 ? Math.min(X1 - 1, X0 + 1 + index) : Math.max(X0 + 1, X1 - 1 - index));
-  const free = nearestFree(row, col);
-  a.x = (free ? free.c : col) + 0.5;
-  a.y = (free ? free.r : row) + 0.5;
-  a.hp = a.maxHp; a.downFor = 0; a.stunnedFor = 0;
-  a.attackCd = 0; a.barrierAttackCd = 0; a.ballHitCd = 0;
-  a.route = null; a.target = null; a.goal = null; a.animHold = null;
-  a.facing = a.team === 0 ? 1 : -1;
-  setAnim(a, 'Default', true);
-  logf(`${a.id.replace(/^\d+_/, '')} 恢复行动`);
-}
-
-// ---------------- 主循环 ----------------
-let last = performance.now();
-function step(dt) {
-  if (G.restartWindow > 0) {
-    G.restartWindow = Math.max(0, G.restartWindow - dt);
-    if (G.restartWindow === 0 && G.restartTeam != null) restartBall(G.restartTeam);
-  }
-  if (G.over) return;
-  if (G.pause > 0) { G.pause = Math.max(0, G.pause - dt); return; }
-  G.t -= dt;
-  if (G.t <= 0) { G.t = 0; endMatch(); return; }
-
-  const B = G.ball;
-  for (const a of actors) {
-    a.attackCd = Math.max(0, a.attackCd || 0);
-    a.barrierAttackCd = Math.max(0, a.barrierAttackCd || 0);
-    a.ballHitCd = Math.max(0, a.ballHitCd || 0);
-    if (a.downFor > 0) {
-      a.downFor = Math.max(0, a.downFor - dt);
-      if (a.downFor === 0) respawnActor(a);
-      continue;
-    }
-    a.stunnedFor = Math.max(0, (a.stunnedFor || 0) - dt);
-    const styleHpFactor = a.team === 0 && G.style === 'anchoring' ? 1 + 0.6 * styleProgress() : 1;
-    a.maxHp = CFG.operatorHp * styleHpFactor;
-    a.hp = Math.min(a.hp, a.maxHp);
-    a.attackCd = Math.max(0, a.attackCd - dt);
-    a.barrierAttackCd = Math.max(0, a.barrierAttackCd - dt);
-    a.ballHitCd = Math.max(0, a.ballHitCd - dt);
-  }
-  const mine = actors.filter(a => a.team === 0), foes = actors.filter(a => a.team === 1);
-  const me = mine[G.controlled];
-  if (me && me.downFor <= 0 && me.stunnedFor <= 0) {
-    const moved = moveByInput(me, movementInput(), CFG.opSpeed * CFG.moveScale, dt);
-    if (!(me.animHold > 0)) setAnim(me, moved ? 'Move' : 'Default', true);
-  } else if (me?.downFor > 0 && me.has('Die')) {
-    setAnim(me, 'Die', false);
-  } else if (me?.stunnedFor > 0) {
-    setAnim(me, me.has('Stun') ? 'Stun' : 'Default', true);
-  }
-  teamStep(mine.filter((_, i) => i !== G.controlled), dt, { attackDir: +1, ownX: X0 });
-  teamStep(foes, dt, { attackDir: -1, ownX: X1 });
-
-  // Separate units without allowing normal control to walk through fixed barriers.
-  for (const team of [0, 1]) {
-    const list = actors.filter(a => a.team === team);
-    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
-      const A = list[i], C = list[j];
-      let dx = C.x - A.x, dy = C.y - A.y, d = Math.hypot(dx, dy);
-      const min = 0.68;
-      if (d < min) {
-        if (d < 1e-4) { dx = 1; dy = 0; d = 1; }
-        const push = (min - d) / 2;
-        A.x -= dx / d * push; A.y -= dy / d * push;
-        C.x += dx / d * push; C.y += dy / d * push;
-      }
-    }
-  }
-
-  // A nearby operator attacks on a cooldown; contact alone does not move the football.
-  let explodedThisFrame = false;
-  for (const a of actors) {
-    if (a.downFor > 0 || a.stunnedFor > 0) continue;
-    const d = Math.hypot(B.x - a.x, B.y - a.y);
-    if (d <= CFG.attackRange && a.attackCd <= 0) {
-      a.attackCd = operatorAttackInterval(a);
-      const hit = applyOperatorHit(B, {
-        id: a.id, x: a.x, y: a.y,
-        cellX: tileC(a.x), cellY: tileR(a.y),
-        attackDamage: operatorAttackDamage(a),
-      });
-      if (hit.pushed) {
-        logf(`${a.team === 0 ? '我方' : '敌方'}累计伤害达到推动阈值，足球被推动`);
-        const attackClip = a.has('Attack') ? 'Attack' : a.has('Interact') ? 'Interact' : 'Default';
-        setAnim(a, attackClip, false);
-        a.animHold = 0.24;
-        if (hit.explode) {
-          const explosive = getBallProfile(B.type);
-          for (const target of actors) {
-            if (target.downFor > 0) continue;
-            const radius = Math.hypot(target.x - B.x, target.y - B.y);
-            if (radius <= explosive.explosionRadius) {
-              target.hp = Math.max(0, target.hp - explosive.explosionDamage);
-              const statusMultiplier = aStyleDisablingTarget(target);
-              target.stunnedFor = Math.max(target.stunnedFor, explosive.explosionStun * statusMultiplier);
-              if (target.hp <= 0) downActor(target, '爆炸足球');
-            }
-          }
-          logf('爆炸足球引爆：范围 1.5，真实伤害 1500，眩晕 3 秒');
-          Object.assign(B, createBallState('explosive', B.x, B.y));
-          setBallAppearance();
-          explodedThisFrame = true;
-          break;
-        }
-      }
-    }
-  }
-
-  // Operators can also attack nearby formation barriers; the ball uses its own attack value below.
-  for (const a of actors) {
-    if (a.downFor > 0 || a.stunnedFor > 0 || a.barrierAttackCd > 0) continue;
-    if (Math.hypot(B.x - a.x, B.y - a.y) <= CFG.attackRange) continue;
-    let target = null, nearest = CFG.barrierAttackRange;
-    for (const barrier of barriers) {
-      const d = Math.hypot(a.x - (barrier.c + 0.5), a.y - (barrier.r + 0.5));
-      if (d < nearest) { nearest = d; target = barrier; }
-    }
-    if (!target) continue;
-    target.hp -= operatorAttackDamage(a);
-    a.barrierAttackCd = CFG.attackInterval;
-    if (target.hp <= 0) {
-      const index = barriers.indexOf(target);
-      if (index >= 0) barriers.splice(index, 1);
-      rebuildBarriers();
-      logf('干员击破阵地屏障');
-    }
-  }
-
-  if (explodedThisFrame) {
-    updateHud();
-    return;
-  }
-  const terrainFriction = terrainFrictionAt(B.x, B.y);
-  advanceBallMotion(B, dt, terrainFriction);
-  markBallTerrainTrail();
-  const profile = getBallProfile(B.type);
-  const ballRadius = CFG.ballR * (B.sizeScale || 1);
-  if (B.y < Y0 + ballRadius) {
-    B.y = Y0 + ballRadius; B.vy = Math.abs(B.vy) * profile.restitution;
-  }
-  if (B.y > Y1 + 1 - ballRadius) {
-    B.y = Y1 + 1 - ballRadius; B.vy = -Math.abs(B.vy) * profile.restitution;
-  }
-
-  // Position barriers take damage from ball impacts and can be destroyed.
-  for (let i = barriers.length - 1; i >= 0; i--) {
-    const b = barriers[i], key = `${b.c}:${b.r}`;
-    const cx = b.c + 0.5, cy = b.r + 0.5;
-    const hw = 0.43 + ballRadius, hh = 0.43 + ballRadius;
-    if (Math.abs(B.x - cx) < hw && Math.abs(B.y - cy) < hh) {
-      if (B.barrierContact !== key) {
-        b.hp -= profile.attack;
-        B.barrierContact = key;
-        if (b.hp <= 0) {
-          barriers.splice(i, 1);
-          rebuildBarriers();
-          B.barrierContact = null;
-          B.vx *= 0.8; B.vy *= 0.8;
-          logf('阵地屏障被足球击破');
-          break;
-        }
-      }
-      const ox = hw - Math.abs(B.x - cx), oy = hh - Math.abs(B.y - cy);
-      if (ox < oy) {
-        B.x = cx + (B.x >= cx ? hw : -hw);
-        B.vx = -B.vx * profile.restitution;
-      } else {
-        B.y = cy + (B.y >= cy ? hh : -hh);
-        B.vy = -B.vy * profile.restitution;
-      }
-    } else if (B.barrierContact === key) {
-      B.barrierContact = null;
-    }
-  }
-
-  // A goalie blocks a ball travelling toward their own goal and allows a five-second restart.
-  for (const a of actors) {
-    if (a.role !== 'goalkeeper') continue;
-    const towardOwnGoal = (a.team === 0 && B.vx < 0) || (a.team === 1 && B.vx > 0);
-    if (!towardOwnGoal) continue;
-    if (Math.hypot(B.x - a.x, B.y - a.y) <= ballRadius + 0.34) {
-      B.vx = 0; B.vy = 0; B.damage = 0; B.barrierContact = null;
-      B.x = a.team === 0 ? X0 + 0.8 : X1 + 0.2;
-      B.y = Math.max(Y0 + 0.35, Math.min(Y1 + 0.65, a.y));
-      G.restartTeam = a.team; G.restartWindow = 5; G.pause = 0.2;
-      logf(`${a.team === 0 ? '我方' : '敌方'}守门员挡球：5 秒内可重新开球`);
-      syncBallMesh();
-      updateHud();
-      return;
-    }
-  }
-
-  const ballImpactSpeed = Math.hypot(B.vx, B.vy);
-  for (const a of actors) {
-    if (a.role === 'goalkeeper' || a.downFor > 0 || a.ballHitCd > 0 || explodedThisFrame) continue;
-    if (ballImpactSpeed < 0.35) continue;
-    if (Math.hypot(B.x - a.x, B.y - a.y) > ballRadius + 0.28) continue;
-    a.ballHitCd = CFG.ballHitCooldown;
-    const damage = ballImpactDamage(a, getBallProfile(B.type).attack);
-    a.hp = Math.max(0, a.hp - damage);
-    if (a.hp <= 0) downActor(a, getBallProfile(B.type).label);
-    else logf(`${a.id.replace(/^\d+_/, '')} 受到足球冲击：-${damage} HP`);
-  }
-
-  if (B.x < X0 - 0.15) return goal(-1);
-  if (B.x > X1 + 1 + 0.15) return goal(+1);
-  syncBallMesh();
-
-  for (const a of actors) {
-    if (a.animHold != null) {
-      a.animHold -= dt;
-      if (a.animHold <= 0) {
-        a.animHold = null;
-        if (a.downFor > 0) setAnim(a, a.has('Die') ? 'Die' : 'Default', false);
-        else if (a.stunnedFor > 0) setAnim(a, a.has('Stun') ? 'Stun' : 'Default', true);
-        else setAnim(a, a === me && movementInput().active ? 'Move' : 'Default', true);
-      }
-    }
-  }
-}
-
-function endMatch() {
-  G.over = true;
-  document.getElementById('overImg').src = 'ui/football/match_over.png';
-  const margin = G.score.ally - G.score.enemy;
-  const stamps = margin >= 4 ? 3 : margin >= 2 ? 2 : margin >= 1 ? 1 : 0;
-  const result = document.getElementById('resultText');
-  if (result) result.textContent =
-    `终场 ${G.score.ally} : ${G.score.enemy}｜净胜球 ${margin}｜嘉奖印章 ${stamps}/3（目标：净胜 1 / 2 / 4 球）`;
-  document.getElementById('over').style.display = 'flex';
-  logf(`比赛结束 ${G.score.ally} : ${G.score.enemy}`);
-}
-
-function frame() {
-  try {
-    const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
-    if (!G.over) step(dt);
-    syncThreeCamera(cam, cam3, innerWidth, innerHeight);
-    renderer.render(scene, cam3);
-    for (const a of actors) {
-      const p = cam.project(a.x, a.y, 0);
-      a.sp.x = p.x; a.sp.y = p.y;
-      const s = 1.2 * p.s / a.natH;
-      const sign = a.facing < 0 ? -1 : 1;
-      a.sp.scale.set(s * sign, s);
-      a.sp.update(dt);
-    }
-    updateHud();
-  } catch (e) { window.__cue = { err: String(e && e.message || e) }; }
-  requestAnimationFrame(frame);
-}
-
-// ---------------- 启动 ----------------
-window.__cu = {
-  G, actors, field: { COLS, ROWS, X0, X1, Y0, Y1 }, cfg: CFG, barriers,
-  ready: false, camDebug: () => camDebug,
-  corners: () => [[0, 0], [COLS, 0], [COLS, ROWS], [0, ROWS]].map(([x, y]) => { const q = cam.project(x, y, 0); return [Math.round(q.x), Math.round(q.y)]; }),
-  switchTo: (i) => { switchControlled(i); },
-  setInput: (x, y) => { G.joy = { x: Math.max(-1, Math.min(1, x)), y: Math.max(-1, Math.min(1, y)) }; },
-  movementInput,
-  hitBall: (actorIndex = G.controlled) => {
-    const a = actors.filter(x => x.team === 0)[actorIndex];
-    return a ? applyOperatorHit(G.ball, { id: a.id, x: a.x, y: a.y, cellX: tileC(a.x), cellY: tileR(a.y), attackDamage: a.attackDamage }) : null;
-  },
-  camProj: (x, y) => { const q = cam.project(x, y, 0); return [Math.round(q.x), Math.round(q.y)]; },
-  moveTo: (r, c) => { const me = actors.filter(a => a.team === 0)[G.controlled]; if (me && walkable(r, c)) { me.target = { r, c }; me.route = null; me.goal = null; return true; } return false; },
-  testPick: (sx, sy) => { const h = pickTile(cam, sx, sy, () => 0, [0], 64, 64); return h ? { row: h.row, col: h.col } : null; },
-  dbg: (sr, sc, er, ec) => {
-    const out = { pass: [], wp: null, err: null };
-    for (let r = 0; r < ROWS; r++) { let s = ''; for (let c = 0; c < COLS; c++) s += GRID.groundPassable(r, c) ? '.' : '#'; out.pass.push(s); }
-    try { out.wp = GRID.waypoints(sr, sc, er, ec, { ignoreObstacles: false }); } catch (e) { out.err = String(e.message); }
-    return out;
-  },
-};
-(async () => {
-  // 选人界面
-  const pick = document.getElementById('pick');
-  const btnBox = document.getElementById('pickBtns');
-  for (const id of ROSTER) {
-    const b = document.createElement('button');
-    b.textContent = id.replace(/^\d+_/, '');
-    b.onclick = async () => { pick.style.display = 'none'; await start(id); };
-    btnBox.appendChild(b);
-  }
-  if (location.search.includes('auto=1')) { pick.style.display = 'none'; await start(ROSTER[0]); }
+  return new Grid({rows},{r0:0,r1:8,c0:0,c1:12});
 })();
-
-async function start(myId) {
-  const selectedType = document.getElementById('ballType')?.value || 'standard';
-  Object.assign(G.ball, createBallState(selectedType, CX + 0.5, CY + 0.5));
-  G.iceCells.clear();
-  G.slimeCells.clear();
-  G.style = document.getElementById('teamStyle')?.value || G.style || 'basic';
-  setBallAppearance();
-  rollBarriers(); GRID = buildGrid();
-  const mineIds = [myId, ...ROSTER.filter(x => x !== myId).slice(0, CFG.squad - 1)];
-  const foeIds = ROSTER.filter(x => !mineIds.includes(x)).slice(0, CFG.squad);
-  for (const id of mineIds) { try { actors.push(await loadChibi(id, 0)); } catch (e) { logf('载入失败 ' + id); } }
-  for (const id of foeIds) { try { actors.push(await loadChibi(id, 1)); } catch (e) { logf('载入失败 ' + id); } }
-  rebuildBarriers();
-  resetPositions(); updateHud(); preloadSfx();
-  // 风格条（官方 6 种比赛风格）
-  const bar = document.getElementById('stylebar');
-  ['basic', 'anchoring', 'offensive', 'roaming', 'supportive', 'disabling'].forEach((s, i) => {
-    const img = document.createElement('img');
-    img.src = `ui/style/buff_icon_${s}_show.png`;
-    img.alt = STYLE_LABELS[s];
-    img.title = `${STYLE_LABELS[s]}风格（原型简化规则）`;
-    img.setAttribute('role', 'button');
-    img.tabIndex = 0;
-    if (s === G.style) img.classList.add('on');
-    const selectStyle = () => {
-      G.style = s;
-      bar.querySelectorAll('img').forEach(x => x.classList.toggle('on', x === img));
-      const select = document.getElementById('teamStyle');
-      if (select) select.value = s;
-      logf(`比赛风格 → ${STYLE_LABELS[s]}`);
-      updateHud();
-    };
-    img.onclick = selectStyle;
-    img.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectStyle(); } };
-    bar.appendChild(img);
-  });
-  const hud = document.getElementById('hud'), clk = document.getElementById('clock');
-  if (hud) hud.style.display = 'flex';
-  if (clk) clk.style.display = 'block';
-  window.__cu.ready = true;
-  requestAnimationFrame(frame);
+function canUseGridCell(x,y) {
+  return x>=1&&x<=11&&y>=1&&y<=7&&sceneGrid.groundPassable(y,x);
 }
-document.getElementById('again').onclick = () => location.reload();
+function chosenPlayer() {return stateUi.match?.players.find(player=>player.id===stateUi.owner);}
+function chosenUnit() {return stateUi.match?.fieldUnits.find(unit=>unit.id===stateUi.selectedUnit);}
+function toast(message) {
+  const node=$('toast');node.textContent=message;node.style.display='block';
+  clearTimeout(stateUi.toastTimeout);stateUi.toastTimeout=setTimeout(()=>node.style.display='none',2400);
+}
+function escapeHtml(value) {
+  return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+}
+function showToastFromResult(result) {
+  if(result&&result.ok===false)toast('操作未执行：'+({
+    'operator-not-in-bench':'干员不在待部署池','match-not-deployable':'当前阶段不可部署',
+    'invalid-field-cell':'不能在界外部署','already-deployed':'干员已经部署',
+    'redeploy-cooldown':'干员仍在再部署冷却','insufficient-cost':'部署费用不足',
+    'deploy-limit':'超过部署上限','occupied-cell':'该格已被占用','unit-not-deployed':'干员不在场上',
+    'unit-not-active':'干员当前不可行动','skill-not-found':'技能不存在','insufficient-sp':'技力不足',
+    'skill-cooldown':'技能尚未就绪','ball-too-heavy-for-shift':'位移力度不足以推动此球',
+    'restart-not-available':'当前没有可用的重新开球时机','item-cooldown':'携带物正在冷却',
+  }[result.reason]||result.reason||'未知原因'));
+  return result;
+}
+function broadcastSnapshot() {
+  if(!stateUi.socket||stateUi.socket.readyState!==WebSocket.OPEN||!stateUi.host||!stateUi.match)return;
+  try{stateUi.socket.send(JSON.stringify({type:'snapshot',roomId:stateUi.roomId,state:stateUi.match}));}catch{}
+}
+function sendOnlineCommand(action,payload={}) {
+  if(!stateUi.socket||stateUi.socket.readyState!==WebSocket.OPEN){toast('联机链路未连接');return;}
+  stateUi.socket.send(JSON.stringify({type:'command',roomId:stateUi.roomId,action,payload}));
+}
+function applyCommand(ownerId,action,payload={}) {
+  if(!stateUi.match)return;
+  let result=null;
+  switch(action){
+    case 'deploy': result=deployOperator(stateUi.match,ownerId,payload.operatorId,payload.x,payload.y);stateUi.match=result.state;if(result.ok){stateUi.selectedBench=null;stateUi.selectedUnit=result.unitId;}break;
+    case 'withdraw': result=withdrawOperator(stateUi.match,payload.unitId);stateUi.match=result.state;if(result.ok)stateUi.selectedUnit=null;break;
+    case 'skill': result=activateSkill(stateUi.match,payload.unitId,payload.skillIndex??0);stateUi.match=result.state;break;
+    case 'item': result=activateCarriedItem(stateUi.match,ownerId);stateUi.match=result.state;break;
+    case 'start': stateUi.match=startBattle(stateUi.match);result={ok:true};break;
+    case 'restart': result=restartBall(stateUi.match,ownerId,payload.x??(ownerId===0?1.4:11.6),payload.y??4.5);stateUi.match=result.state;break;
+    case 'mark': stateUi.match=markCell(stateUi.match,ownerId,payload.x,payload.y);result={ok:true};break;
+    case 'pause': stateUi.match=votePause(stateUi.match,ownerId,payload.paused);result={ok:true};break;
+    case 'speed': stateUi.match=voteSpeed(stateUi.match,ownerId,payload.fast);result={ok:true};break;
+    default: result={ok:false,reason:'unknown-action'};
+  }
+  if(result)showToastFromResult(result);
+  if(stateUi.host&&stateUi.online)broadcastSnapshot();
+  stateUi.lastDrawKey='';
+  renderPanels(true);
+}
+function dispatch(action,payload={}) {
+  if(!stateUi.match)return;
+  const owner=stateUi.online?stateUi.localOwner:stateUi.owner;
+  if(stateUi.online&&!stateUi.host){sendOnlineCommand(action,payload);return;}
+  applyCommand(owner,action,payload);
+}
+function connectOnline(mode,roomId,wsUrl) {
+  const socket=new WebSocket(wsUrl);
+  stateUi.socket=socket;stateUi.online=true;stateUi.host=mode==='create';stateUi.roomId=roomId||null;
+  $('roomStatus').textContent='正在连接房间服务…';
+  socket.addEventListener('open',()=>{
+    const request={type:mode==='create'?'create':'join',roomId:roomId||'',clientName:'阵地足球玩家'};
+    socket.send(JSON.stringify(request));
+  });
+  socket.addEventListener('message',event=>{
+    let message;try{message=JSON.parse(event.data);}catch{return;}
+    if(message.type==='assigned'){
+      stateUi.localOwner=message.ownerId;stateUi.roomId=message.roomId;
+      $('roomInput').value=message.roomId;
+      $('roomStatus').textContent='房间 '+message.roomId+' 已连接，你是玩家 '+(message.ownerId+1)+'。';
+      if(stateUi.host){
+        initializeMatch();
+        broadcastSnapshot();
+      }else{
+        $('roomStatus').textContent='已加入 '+message.roomId+'，等待房主同步比赛状态…';
+      }
+    }else if(message.type==='snapshot'&&message.state){
+      stateUi.match=message.state;
+      stateUi.host=false;
+      if(!$('deploymentPanel').style.display||$('deploymentPanel').style.display==='none')showGame();
+      renderPanels(true);
+    }else if(message.type==='command'&&stateUi.host){
+      applyCommand(message.ownerId,message.action,message.payload||{});
+    }else if(message.type==='peer-joined'){
+      toast('玩家 '+(message.ownerId+1)+' 已加入');
+      if(stateUi.host)broadcastSnapshot();
+    }else if(message.type==='peer-left'){
+      toast('玩家 '+(message.ownerId+1)+' 断线；房间保留等待重连');
+    }else if(message.type==='error'){
+      $('roomStatus').textContent='联机错误：'+(message.message||'未知错误');
+      toast($('roomStatus').textContent);
+    }
+  });
+  socket.addEventListener('close',()=>{
+    if(stateUi.online)toast('联机已断开；当前状态仅保存在本浏览器。');
+    $('roomStatus').textContent='WebSocket 已断开。检查是否启动了 py server/room-server.py。';
+    stateUi.socket=null;
+  });
+  socket.addEventListener('error',()=>{
+    $('roomStatus').textContent='无法连接联机服务器。先执行 py server/room-server.py，再检查 WebSocket 地址。';
+  });
+}
+function showGame() {
+  $('pick').style.display='none';
+  $('hud').style.display='flex';$('topStatus').style.display='flex';
+  $('leftPanel').style.display='block';$('deploymentPanel').style.display='flex';
+  stateUi.running=true;renderPanels(true);
+}
+function selectedRosterFromUi() {
+  const ids=[...stateUi.chosenRoster];
+  return stateUi.operators.filter(operator=>ids.includes(operator.id));
+}
+function initializeMatch() {
+  const operators=selectedRosterFromUi();
+  if(!operators.length){toast('至少选择一名干员');return;}
+  const seed=Date.now()>>>0;
+  const stageId=$('stageSelect').value,styleId=$('teamStyle').value,ballType=$('ballType').value;
+  stateUi.match=createMatchState({stageId,styleId,ballType,operators,seed});
+  stateUi.match.mode='two-player';
+  stateUi.match.iceCells={};stateUi.match.slimeCells={};
+  stateUi.match=chooseOpponentTeam(stateUi.match,$('teamSelect').value);
+  stateUi.owner=stateUi.online?stateUi.localOwner:0;
+  stateUi.selectedBench=operators[0]?.id||null;stateUi.selectedUnit=null;
+  showGame();
+}
+async function startFromSetup() {
+  if(stateUi.loading)return;
+  stateUi.loading=true;$('startMatch').disabled=true;
+  const mode=$('connectionMode').value;
+  try{
+    if(mode==='local'){
+      stateUi.online=false;stateUi.host=false;stateUi.localOwner=0;stateUi.roomId=null;
+      initializeMatch();
+    }else{
+      const roomId=$('roomInput').value.trim();
+      const wsUrl=$('wsInput').value.trim()||'ws://127.0.0.1:8765';
+      connectOnline(mode,roomId,wsUrl);
+    }
+  }finally{
+    setTimeout(()=>{stateUi.loading=false;$('startMatch').disabled=false;},350);
+  }
+}
+function buildRosterPicker() {
+  const roster=$('rosterPick');roster.innerHTML='';
+  for(const operator of stateUi.operators){
+    const card=document.createElement('div');card.className='roster-option';
+    const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=stateUi.chosenRoster.has(operator.id);
+    checkbox.id='pick-'+operator.id;
+    checkbox.addEventListener('change',()=>{
+      if(checkbox.checked)stateUi.chosenRoster.add(operator.id);else stateUi.chosenRoster.delete(operator.id);
+      stateUi.lastDrawKey='';
+    });
+    const icon=document.createElement('img');setIcon(icon,iconName[operator.profession]||'role-guard');
+    const label=document.createElement('label');label.htmlFor=checkbox.id;
+    label.innerHTML=escapeHtml(operator.name||operator.id)+'<small>'+escapeHtml(roleName[operator.profession]||operator.profession||'近卫')+' · COST '+escapeHtml(operator.cost??'?')+'</small>';
+    card.append(checkbox,icon,label);roster.appendChild(card);
+  }
+}
+async function loadOperatorCatalog() {
+  let data=null;
+  try{
+    const response=await fetch('/assets/local/operators.generated.json');
+    if(response.ok)data=await response.json();
+  }catch{}
+  if(!data){
+    const response=await fetch('/data/football/operators-fallback.json');
+    if(!response.ok)throw new Error('干员回退目录读取失败');
+    data=await response.json();
+  }
+  stateUi.operators=(data.operators||data).filter(operator=>operator&&operator.id).map(operator=>({
+    ...operator,profession:operator.profession||operator.position||'guard',
+    skills:Array.isArray(operator.skills)?operator.skills:[],
+  }));
+  stateUi.chosenRoster=new Set(stateUi.operators.map(operator=>operator.id));
+  buildRosterPicker();
+  if(data.status==='fallback-calibration')$('roomStatus').textContent='已加载仓库回退干员目录（数值为校准数据）；本机完整数据未找到。';
+  else $('roomStatus').textContent='已加载本机干员数据：'+stateUi.operators.length+' 名。';
+}
+function renderBench() {
+  const match=stateUi.match;if(!match)return;
+  const bench=$('bench'),player=chosenPlayer();
+  if(!player)return;
+  const signature=player.bench.map(item=>item.id+':'+(match.redeployRemaining[ownerUnitKey(stateUi.owner,item.id)]||0)).join('|')+';selected='+stateUi.selectedBench+';owner='+stateUi.owner;
+  if(signature===bench.dataset.signature)return;
+  bench.dataset.signature=signature;bench.innerHTML='';
+  for(const operator of player.bench){
+    const card=document.createElement('button');card.type='button';card.className='operator-card'+(stateUi.selectedBench===operator.id?' selected':'');
+    const icon=document.createElement('img');icon.className='role-icon';setIcon(icon,iconName[operator.profession]||'role-guard');
+    const name=document.createElement('span');name.className='op-name';name.textContent=operator.name||operator.id;
+    const meta=document.createElement('span');meta.className='op-meta';meta.textContent=(roleName[operator.profession]||operator.profession||'干员')+' · '+(operator.rarity??'—')+'★';
+    const cost=document.createElement('span');cost.className='op-cost';cost.textContent='C '+(operator.cost??12);
+    const cd=match.redeployRemaining[ownerUnitKey(stateUi.owner,operator.id)]||0;
+    const cooldown=document.createElement('span');cooldown.className='op-meta cooldown';cooldown.textContent=cd>0?('再部署 '+Math.ceil(cd)+'s'):'待部署';
+    card.append(icon,name,meta,cost,cooldown);
+    card.addEventListener('click',()=>{
+      stateUi.selectedBench=operator.id;stateUi.selectedUnit=null;renderPanels(true);
+      toast('已选择 '+(operator.name||operator.id)+'，点击场地内格完成部署。');
+    });
+    bench.appendChild(card);
+  }
+}
+function ownerUnitKey(owner,operatorId){return owner+':'+operatorId;}
+function renderUnitControls() {
+  const match=stateUi.match;if(!match)return;
+  const list=$('unitControls');
+  const owned=match.fieldUnits.filter(unit=>unit.ownerId===stateUi.owner);
+  const signature=owned.map(unit=>unit.id+':'+Math.floor(unit.hp)+':'+Math.floor(unit.sp)+':'+unit.alive).join('|')+';sel='+stateUi.selectedUnit;
+  if(signature===list.dataset.signature)return;
+  list.dataset.signature=signature;list.innerHTML='';
+  for(const unit of owned){
+    const button=document.createElement('button');
+    button.className='unit-chip'+(unit.id===stateUi.selectedUnit?' selected':'');
+    button.textContent=(unit.alive?'● ':'× ')+(unit.name||unit.operatorId)+' HP '+Math.max(0,Math.floor(unit.hp))+' SP '+Math.floor(unit.sp);
+    button.addEventListener('click',()=>{stateUi.selectedUnit=unit.id;stateUi.selectedBench=null;renderPanels(true);});
+    list.appendChild(button);
+  }
+  if(!owned.length)list.textContent='场上还没有我方干员。';
+}
+function renderActionControls() {
+  const match=stateUi.match,unit=chosenUnit();
+  const selected=$('selectedLabel'),skill=$('skillButton'),withdraw=$('withdrawButton');
+  if(!match)return;
+  if(unit){
+    selected.textContent=unit.name+'｜'+(roleName[unit.profession]||unit.profession)+'｜HP '+Math.max(0,Math.floor(unit.hp))+'/'+Math.floor(unit.maxHp)+'｜SP '+Math.floor(unit.sp)+'/'+unit.maxSp;
+    skill.disabled=!unit.alive||!unit.skills?.length;
+    skill.innerHTML='';
+    const skillIcon=document.createElement('img');skillIcon.width=24;skillIcon.height=24;setIcon(skillIcon,iconName[unit.profession]||'role-specialist');
+    skill.append(skillIcon,document.createTextNode(unit.skills?.[0]?.name||'无技能'));
+    withdraw.disabled=false;
+  }else{
+    selected.textContent=stateUi.selectedBench?'已选择待部署干员：'+(stateUi.operators.find(x=>x.id===stateUi.selectedBench)?.name||stateUi.selectedBench)+'；点击格子部署。':'选择待部署干员，再点击蓝色方格部署；选择场上干员可用技能或撤退。';
+    skill.disabled=true;skill.textContent='释放技能';withdraw.disabled=true;
+  }
+  $('cost0').textContent='P1 费用 '+match.players[0].cost;
+  $('cost1').textContent='P2 费用 '+match.players[1].cost;
+  $('readyButton').textContent=match.phase==='battle'?'作战进行中':match.phase==='finished'?'本局结束':'开始战斗';
+  $('readyButton').disabled=match.phase!=='deployment';
+  $('pauseButton').textContent=match.paused?'恢复作战':'协同暂停';
+  $('speedButton').textContent=match.speed===2?'恢复一倍速':'协同二倍速';
+  const restartVisible=match.ballInBench&&match.restart.ownerId===stateUi.owner&&match.restart.remaining>0;
+  $('restartButton').style.display=restartVisible?'inline-block':'none';
+}
+function renderPanels(force=false) {
+  const match=stateUi.match;if(!match)return;
+  const key=match.phase+':'+match.timeRemaining.toFixed(1)+':'+match.score.ally+':'+match.score.enemy+':'+match.players.map(p=>p.cost).join(':')+':'+match.fieldUnits.map(u=>u.id+u.hp+u.sp).join('|')+':'+stateUi.owner+':'+stateUi.selectedUnit+':'+stateUi.selectedBench;
+  if(!force&&key===stateUi.lastDrawKey)return;
+  stateUi.lastDrawKey=key;
+  $('scoreAlly').textContent=match.score.ally;$('scoreEnemy').textContent=match.score.enemy;
+  const seconds=Math.max(0,Math.ceil(match.timeRemaining));
+  $('clock').textContent=String(Math.floor(seconds/60)).padStart(2,'0')+':'+String(seconds%60).padStart(2,'0');
+  $('stagePill').textContent=MATCH_STAGES[match.stageId]?.label||match.stageId;
+  $('teamPill').textContent=teamName[match.opponentTeamId]||match.opponentTeamId;
+  $('ballPill').textContent=profileNames[match.ball.type]||match.ball.type;
+  $('stylePill').textContent=styleName[match.styleId]||match.styleId;
+  $('owner0').classList.toggle('active',stateUi.owner===0);$('owner1').classList.toggle('active',stateUi.owner===1);
+  $('owner0').disabled=stateUi.online&&stateUi.localOwner!==0;$('owner1').disabled=stateUi.online&&stateUi.localOwner!==1;
+  const profile=getBallProfile(match.ball.type);
+  $('matchInfo').textContent='阶段：'+(MATCH_STAGES[match.stageId]?.label||match.stageId)+'\\n球队：'+(teamName[match.opponentTeamId]||match.opponentTeamId)+'\\n风格：'+(styleName[match.styleId]||match.styleId)+'\\n足球：'+(profileNames[match.ball.type]||match.ball.type)+'\\n推动伤害：'+Math.floor(match.ball.damage)+' / '+getPushThreshold(match.ball)+'\\n重量等级：'+profile.weight+'\\n球速：'+Math.hypot(match.ball.vx,match.ball.vy).toFixed(2)+'\\n球员：'+match.fieldUnits.length+' 位\\n当前控制：玩家 '+(stateUi.owner+1)+'\\n阶段状态：'+match.phase;
+  $('statusLine').textContent=match.ballInBench?'守门/阻挡后重新开球窗口：'+Math.ceil(match.restart.remaining)+' 秒。':match.phase==='deployment'?'选择干员并部署。双方确认准备后开始战斗。':match.phase==='battle'?'自动作战中：点击场上干员可选中并释放技能；点击空格可部署待部署干员。':match.phase==='finished'?'终场：净胜 '+(match.score.ally-match.score.enemy)+' 球，获得 '+match.stamps+' 枚嘉奖印章。':'';
+  renderBench();renderUnitControls();renderActionControls();
+  const lastEvents=match.events.slice(-5).map(event=>event.type==='GOAL'?'进球：'+event.score.ally+':'+event.score.enemy:event.type==='BALL_PUSHED'?'足球被推动':event.type==='OPERATOR_DEPLOYED'?'部署：'+event.operatorId:event.type==='OPERATOR_WITHDRAWN'?'撤退：'+event.operatorId:event.type==='UNIT_DOWN'?'球员进入喘息：'+event.unitId:event.type==='CARRY_ITEM_TRIGGERED'?'携带物触发：'+event.itemId:event.type);
+  $('eventLog').innerHTML=lastEvents.map(text=>'<div class="event">'+escapeHtml(text)+'</div>').join('');
+}
+function updateEngine(delta) {
+  if(!stateUi.match||!stateUi.running)return;
+  if(stateUi.online&&!stateUi.host)return;
+  stateUi.simAccumulator+=Math.min(.1,delta)*(stateUi.match.speed||1);
+  let ticked=false;
+  while(stateUi.simAccumulator>=.05){
+    stateUi.match=tickMatch(stateUi.match,.05);
+    stateUi.simAccumulator-=.05;ticked=true;
+  }
+  if(ticked&&stateUi.online&&stateUi.host&&performance.now()-stateUi.lastBroadcast>180){
+    broadcastSnapshot();stateUi.lastBroadcast=performance.now();
+  }
+}
+function animateFrame(now) {
+  const dt=Math.max(0,Math.min(.1,(now-stateUi.previousFrame)/1000));stateUi.previousFrame=now;
+  updateEngine(dt);
+  syncUnitMeshes();syncBarrierMeshes();syncBallMesh();
+  renderer.render(scene,camera);
+  if(stateUi.match)renderPanels(false);
+  requestAnimationFrame(animateFrame);
+}
+function tryDeployAtCell(cell) {
+  if(!stateUi.match||!stateUi.selectedBench)return false;
+  if(!canUseGridCell(cell.x,cell.y)){toast('不能在界外格部署。');return true;}
+  dispatch('deploy',{operatorId:stateUi.selectedBench,x:cell.x,y:cell.y});return true;
+}
+renderer.domElement.addEventListener('pointerdown',event=>{
+  if(!stateUi.match||$('pick').style.display!=='none')return;
+  const cell=pickTile(event);if(!cell)return;
+  if(stateUi.selectedBench){tryDeployAtCell(cell);return;}
+  const unit=stateUi.match.fieldUnits.find(candidate=>Math.round(candidate.x)===cell.x&&Math.round(candidate.y)===cell.y);
+  if(unit){stateUi.selectedUnit=unit.id;stateUi.owner=unit.ownerId;stateUi.selectedBench=null;renderPanels(true);return;}
+  dispatch('mark',{x:cell.x,y:cell.y});
+});
+$('owner0').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==0)return;stateUi.owner=0;stateUi.selectedUnit=null;renderPanels(true);});
+$('owner1').addEventListener('click',()=>{if(stateUi.online&&stateUi.localOwner!==1)return;stateUi.owner=1;stateUi.selectedUnit=null;renderPanels(true);});
+$('readyButton').addEventListener('click',()=>dispatch('start',{}));
+$('pauseButton').addEventListener('click',()=>dispatch('pause',{paused:!stateUi.match?.pauseVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
+$('speedButton').addEventListener('click',()=>dispatch('speed',{fast:!stateUi.match?.speedVotes?.[stateUi.online?stateUi.localOwner:stateUi.owner]}));
+$('skillButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('skill',{unitId:stateUi.selectedUnit,skillIndex:0});});
+$('withdrawButton').addEventListener('click',()=>{if(stateUi.selectedUnit)dispatch('withdraw',{unitId:stateUi.selectedUnit});});
+$('itemButton').addEventListener('click',()=>dispatch('item',{}));
+$('restartButton').addEventListener('click',()=>dispatch('restart',{x:stateUi.owner===0?1.6:10.4,y:4.5}));
+$('startMatch').addEventListener('click',startFromSetup);
+$('connectionMode').addEventListener('change',()=>{
+  $('onlineSetup').style.display=$('connectionMode').value==='local'?'none':'flex';
+});
+$('stageSelect').addEventListener('change',()=>{
+  $('roomStatus').textContent=$('stageSelect').value==='elite'?'特级赛不套用技力需求 -20% 折扣；SP 自然回复仍按规则配置执行。':'选择阶段后会加载相应比赛时长、费用和技力参数。';
+});
+window.__footballDebug={get state(){return stateUi.match;},get localOwner(){return stateUi.localOwner;},deploy:(id,x,y)=>dispatch('deploy',{operatorId:id,x,y}),skill:(id,i=0)=>dispatch('skill',{unitId:id,skillIndex:i}),forceRender:()=>renderPanels(true)};
+(async()=>{
+  try{
+    await loadPublicAssets();
+    await loadOperatorCatalog();
+  }catch(error){$('roomStatus').textContent='启动失败：'+error.message;}
+  $('onlineSetup').style.display='none';
+  requestAnimationFrame(animateFrame);
+})();
