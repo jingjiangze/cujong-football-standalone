@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  MATCH_STAGES, MATCH_STYLES, OPPONENT_TEAMS, createMatchState,
+  MATCH_STAGES, MATCH_RULESETS, MATCH_STYLES, OPPONENT_TEAMS, createMatchState,
   deployOperator, withdrawOperator, activateSkill, activateCarriedItem, deployCarriedItem,
   requestCost, respondCostRequest, startBattle, tickMatch, getStampCount, votePause, voteSpeed, restartBall,
 } from '../lib/football/match-engine.mjs';
@@ -145,4 +145,25 @@ test('a field-deployed goalkeeper does not consume normal deploy limit and both 
   assert.equal(keeper.state.fieldUnits[0].role,'goalkeeper');
   const field=deployOperator(keeper.state,0,'test-vanguard',4,4);
   assert.equal(field.ok,true);
+});
+
+test('ruleset versions apply different redeploy timers and elite SP costs', () => {
+  assert.equal(MATCH_RULESETS.classic.redeployTimeMultiplier, 0.5);
+  assert.equal(MATCH_RULESETS.updated.redeployTimeMultiplier, 1);
+
+  for (const [rulesetId, expectedDelay] of [['classic', 10], ['updated', 20]]) {
+    let state=createMatchState({rulesetId,operators:roster});
+    const deployed=deployOperator(state,0,'test-vanguard',3,3);
+    const withdrawn=withdrawOperator(deployed.state,deployed.unitId);
+    assert.equal(withdrawn.state.redeployRemaining[deployed.unitId],expectedDelay);
+  }
+
+  const eliteRoster=[{...roster[0],skills:[{id:'elite-cost',name:'SP test',spCost:10,initialSp:20,cooldownSeconds:1,effect:{type:'attack-buff',duration:1}}]}];
+  for (const [rulesetId, expectedRemaining] of [['classic',12],['updated',10]]) {
+    let state=createMatchState({rulesetId,stageId:'elite',operators:eliteRoster});
+    const deployed=deployOperator(state,0,'test-vanguard',3,3);
+    const activated=activateSkill(deployed.state,deployed.unitId,0);
+    assert.equal(activated.ok,true);
+    assert.equal(activated.state.fieldUnits[0].sp,expectedRemaining);
+  }
 });
