@@ -132,6 +132,42 @@ test('AI makes progress on its own: it fills the field over repeated decision ro
   assert.equal(owned.every(unit => unit.ownerId === 1 && unit.team === 0), true);
 });
 
+test('allied units close the distance to a stationary ball instead of standing still', () => {
+  let state = createMatchState({ operators: roster, ballType: 'standard', seed: 23 });
+  // 落点取 x=3：x=1 会被 keeperCell 判成守门位，x=2 / x=10 是 startBattle 播撒的屏障列。
+  // 球静止在 (6.5,4.5)，敌方全部在 x>=9.4 的右侧，0.5 秒内球不会被任何单位碰到。
+  state = deployOperator(state, 1, 'test-vanguard', 3, 3).state;
+  const unit = state.fieldUnits.find(item => item.ownerId === 1);
+  assert.equal(unit.role, 'field');
+  const startX = unit.x;
+  const startDist = Math.hypot(unit.x - state.ball.x, unit.y - state.ball.y);
+  assert.ok(startDist > unit.range, `测试前提：单位初始应在射程之外，实际 ${startDist.toFixed(2)}`);
+  state = voteReady(state, 0, true);
+  state = voteReady(state, 1, true);
+  assert.equal(state.phase, 'battle');
+  for (let step = 0; step < 10; step++) state = tickMatch(state, .05);
+  const moved = state.fieldUnits.find(item => item.id === unit.id);
+  assert.ok(moved.x > startX + .2, `单位应向右朝球推进，实际 x=${moved.x.toFixed(2)}（起点 ${startX}）`);
+  const endDist = Math.hypot(moved.x - state.ball.x, moved.y - state.ball.y);
+  assert.ok(endDist < startDist - .2, `与球的距离应明显缩短：${startDist.toFixed(2)} → ${endDist.toFixed(2)}`);
+});
+
+test('allied goalkeeper holds the goal column and never chases the ball', () => {
+  let state = createMatchState({ operators: roster, ballType: 'standard', seed: 23 });
+  state = deployOperator(state, 1, 'test-keeper', 1, 3).state;
+  const keeper = state.fieldUnits.find(item => item.ownerId === 1);
+  assert.equal(keeper.role, 'goalkeeper');
+  const startDist = Math.hypot(keeper.x - state.ball.x, keeper.y - state.ball.y);
+  assert.ok(startDist > keeper.range, `测试前提：守门员初始应在射程之外，实际 ${startDist.toFixed(2)}`);
+  state = voteReady(state, 0, true);
+  state = voteReady(state, 1, true);
+  assert.equal(state.phase, 'battle');
+  for (let step = 0; step < 10; step++) state = tickMatch(state, .05);
+  const after = state.fieldUnits.find(item => item.id === keeper.id);
+  assert.equal(after.x, keeper.x, '守门员不应离开球门列');
+  assert.equal(after.y, keeper.y, '守门员不应纵向追球');
+});
+
 test('a full single-player match keeps both sides in sync after ticking', () => {
   let state = createMatchState({ operators: roster, seed: 23 });
   const profile = getBallProfile(state.ball.type);

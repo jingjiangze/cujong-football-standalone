@@ -11,12 +11,12 @@
 当前 PR：[#2 Single-player football with AI teammates, plus official rule alignment](https://github.com/jingjiangze/cujong-football-standalone/pull/2)（`feat/football-battle` → `main`）  
 上一轮 PR：[#1 修正阵地足球：基建式移动与促融共竞规则](https://github.com/jingjiangze/cujong-football-standalone/pull/1)（分支 `fix/official-football-rules-base-movement`）
 
-已审计文件：`main.js`、`index.html`、`serve.py`、`lib/football-rules.mjs`、`lib/football/match-engine.mjs`、`lib/football/ai-teammates.mjs`、`server/room-server.py`、`tools/test-football-rules.mjs`、`tools/test-match-engine.mjs`、`tools/test-ai-teammates.mjs`、`tools/test-match-state.mjs`、`tools/test_room_server.py`、`data/level_act1multi_football.json` 的仓库元数据与现有引用、`.gitignore` 和 `.github/workflows/verify-football.yml`。
+已审计文件：`main.js`、`index.html`、`serve.py`、`lib/football-rules.mjs`、`lib/football/match-engine.mjs`、`lib/football/ai-teammates.mjs`、`server/room-server.py`、`tools/test-football-rules.mjs`、`tools/test-match-engine.mjs`、`tools/test-ai-teammates.mjs`、`tools/test_room_server.py`、`.gitignore` 和 `.github/workflows/verify-football.yml`。
 
 主要架构问题（原问题 → 现状，按 2026-10-14 快照更新）：
 
 1. **原问题**：`main.js` 同时承担渲染、输入、AI、道具、球物理和状态更新，缺少独立的可测试比赛状态机。  
-   **现状**：已落地纯函数比赛状态机 `lib/football/match-engine.mjs`（每个操作 `(state, ownerId, …) → { state, ok, reason }`，确定性 LCG 随机）；早期纯函数层 `lib/match-state.mjs`、`lib/operators.mjs` 亦存在。→ **IMPLEMENTED（代码已落地）**。
+   **现状**：已落地纯函数比赛状态机 `lib/football/match-engine.mjs`（每个操作 `(state, ownerId, …) → { state, ok, reason }`，确定性 LCG 随机）；`lib/operators.mjs` 保留。早期平行重复的纯函数层 `lib/match-state.mjs` 已于本次死代码清理中删除（与 `match-engine.mjs` 平行重复且模型冲突）。→ **IMPLEMENTED（代码已落地）**。
 2. **原问题**：每边固定 3 名角色，没有部署费用、部署槽、待部署池、撤退/再部署计时、技力、技能冷却和阵容选择。  
    **现状**：`match-engine.mjs` 实现部署/撤退/再部署、费用增长与上限、技力与技能冷却、待部署池与部署上限（`deployLimit`）、守门位例外（`keeperCell`）；选人页可选阵容相关配置。→ **IMPLEMENTED（代码已落地）**。
 3. **原问题**：没有第二名真实玩家的房间、同步协议或断线恢复；两边均由本地 AI 驱动。  
@@ -30,7 +30,7 @@
 7. **原问题**：官方资源 `.gitignore` 排除应保留；但缺素材时无足够原创默认角色精灵/贴图，场地贴图走可选本地 HEAD 检查。  
    **现状**：`assets/public/` + `assets/fallback/` 提供原创可再分发回退素材（球场、球图标、风格/携带物图标、职业占位精灵、HUD 缺失回退），`manifest.json` 与 `tools/check-assets.py` 校验；`assets/ui`/`assets/chibi`/`assets/local` 仍被忽略。→ **IMPLEMENTED（部分：回退素材与校验已落地；官方本机提取仍需用户自备客户端）**。
 8. **原问题**：CI 只检查语法和足球规则单测，不检查部署/费用/技力/技能/道具/联机协议、场景资源或浏览器集成。  
-   **现状**：`.github/workflows/verify-football.yml` 已增加引擎语法检查、5 个测试文件（足球规则/引擎/AI 队友/状态机/房间中继）、回退素材校验、Python 工具语法校验，并触发于 push 到 `main`/`fix/**`/`feat/**` 及 `main` 的 pull_request。具体某次 run 是否通过以 GitHub Actions 页面为准。→ **IMPLEMENTED（CI 配置已落地；是否 PASS 取决于每次 run 结果，本快照不宣称某次具体通过）**。
+   **现状**：`.github/workflows/verify-football.yml` 已增加引擎语法检查、4 个测试文件（足球规则/引擎/AI 队友/房间中继）、回退素材校验、Python 工具语法校验，并触发于 push 到 `main`/`fix/**`/`feat/**` 及 `main` 的 pull_request。具体某次 run 是否通过以 GitHub Actions 页面为准。→ **IMPLEMENTED（CI 配置已落地；是否 PASS 取决于每次 run 结果，本快照不宣称某次具体通过）**。
 
 ## 2. 官方行为基线
 
@@ -53,9 +53,9 @@
 ## 3. 执行分阶段方案
 
 ### 阶段 A：建立显式状态/规则层
-状态：IMPLEMENTED = 纯函数比赛状态机 `lib/football/match-engine.mjs` 已落地；`lib/match-state.mjs`、`lib/operators.mjs` 早期纯函数层存在；PASS = 由 `.github/workflows/verify-football.yml` 执行 `tools/test-match-engine.mjs`(11) 与 `tools/test-match-state.mjs`(6)，具体通过与否以 CI run 为准。  
+状态：IMPLEMENTED = 纯函数比赛状态机 `lib/football/match-engine.mjs` 已落地；`lib/operators.mjs` 保留（早期平行重复的 `lib/match-state.mjs` 已于本次清理删除）；PASS = 由 `.github/workflows/verify-football.yml` 执行 `tools/test-match-engine.mjs`(11)，具体通过与否以 CI run 为准。  
 实施：
-- 新建 `lib/match-state.mjs`、`lib/deployment.mjs`、`lib/operators.mjs`，保持函数式、数据驱动，不把状态藏到类实例。
+- 新建 `lib/match-state.mjs`、`lib/deployment.mjs`、`lib/operators.mjs`，保持函数式、数据驱动，不把状态藏到类实例。（注：上述三文件中，`lib/match-state.mjs` 已于本次死代码清理中删除——它与 `match-engine.mjs` 平行重复且模型冲突；经 `git log --all -- lib/deployment.mjs` 查证该文件从未进入仓库历史；`lib/operators.mjs` 保留。）
 - 明确定义 Match/Team/Operator/Ball/Barrier/Item/Skill/Network 的状态结构和可序列化 schema。
 - 用纯函数处理状态转换：deploy、retreat、redeploy、tickCost、tickSp、activateSkill、skillMoveBall、spawnItem、useItem、goal、resetAfterShot。
 - 修正推球方向权重与阈值变化、球体碰撞、守门位/普通阻挡位的规则边界。
@@ -113,7 +113,7 @@
 验收：不具备明日方舟客户端的干净克隆仍能完整启动、显示双方角色/足球/球门/障碍/HUD/风格/道具；本地已提取资源能覆盖原创回退；仓库扫描不含被排除的官方美术/音频。
 
 ### 阶段 H：端到端验收与文档
-状态：部分 IMPLEMENTED（文档与 CI 配置已落地；完整浏览器 E2E/Playwright 在本快照未实证）。CI 由 `.github/workflows/verify-football.yml` 执行纯函数单测（足球规则/引擎/AI 队友/状态机/房间中继）、引擎语法检查、回退素材校验、Python 工具语法校验；README 已说明「已验收的规则」「近似模拟」「官方版权素材本地导入方式」与联机本机/局域网启动方法。Playwright 等浏览器端到端测试在事实表中未列出、未实证 → **仍 PENDING**。  
+状态：部分 IMPLEMENTED（文档与 CI 配置已落地；完整浏览器 E2E/Playwright 在本快照未实证）。CI 由 `.github/workflows/verify-football.yml` 执行纯函数单测（足球规则/引擎/AI 队友/房间中继）、引擎语法检查、回退素材校验、Python 工具语法校验；README 已说明「已验收的规则」「近似模拟」「官方版权素材本地导入方式」与联机本机/局域网启动方法。Playwright 等浏览器端到端测试在事实表中未列出、未实证 → **仍 PENDING**。  
 实施：
 - Node 单测覆盖状态机；Python 单测覆盖房间/协议；Playwright 或等价浏览器测试覆盖启动、部署、技能、足球入门、进球、重开球和多人联机。
 - CI 使用最小依赖，测试失败时不可合并；测试分为 BASELINE / IMPLEMENTED / PASS / PENDING 报告。
@@ -142,7 +142,7 @@
 | 多球队战术 AI | IMPLEMENTED（`OPPONENT_TEAMS` + `enemyCombatTick` 按 tactic/角色分支） | PASS：固定种子回放覆盖（由 CI 执行，单次结果以 run 为准） |
 | 原创默认场景/角色素材 | IMPLEMENTED（`assets/public/` + `assets/fallback/` 回退素材 + `manifest.json`） | PASS：无本机客户端的干净克隆（回退素材已可运行；本机官方素材提取仍依赖用户客户端 → 部分） |
 | 本机官方素材覆盖加载 | IMPLEMENTED（部分：`tools/extract-assets.py` + 加载逻辑；产物仍 git 忽略） | PASS：资源清单与加载集成测试（`tools/check-assets.py` 已接入 CI） |
-| 浏览器端到端与 CI | IMPLEMENTED（CI 配置已落地：语法检查/5 个测试文件/素材校验/Python 语法校验） | PASS：完整 E2E 作战流程（Playwright 未在事实表实证 → 仍 PENDING） |
+| 浏览器端到端与 CI | IMPLEMENTED（CI 配置已落地：语法检查/4 个测试文件/素材校验/Python 语法校验） | PASS：完整 E2E 作战流程（Playwright 未在事实表实证 → 仍 PENDING） |
 
 ## 6. 执行纪律
 

@@ -21,7 +21,7 @@ python serve.py            # 默认 0.0.0.0:8100
 6. 守门员可挡下朝己方球门飞来的足球，挡球后可在 5 秒内重新开球；阵地屏障会受球撞击并可被击破。
 7. 5 分钟一局；净胜 1 / 2 / 4 球对应 1 / 2 / 3 枚嘉奖印章。
 
-「单人 + 2 AI 队友」只是选人页「连接模式」下拉中的一项（`single`）；另有「本机双人」（`local`）与「创建 / 加入联机房间」。在 `single` 模式下，另两名己方干员由 `lib/football/ai-teammates.mjs` 驱动，对面 3 名为 AI 对手。单人对战命令统一经 `dispatch(action,payload)`；非房主联机走 WebSocket（`main.js:449-450`）。AI 的移动使用 `lib/grid.js` 的 SPFA 流场寻路（`main.js:2` import `Grid`，`main.js:390` 建立 `sceneGrid`）。
+「单人 + 2 AI 队友」只是选人页「连接模式」下拉中的一项（`single`）；另有「本机双人」（`local`）与「创建 / 加入联机房间」。在 `single` 模式下，另两名己方干员由 `lib/football/ai-teammates.mjs` 驱动（只读状态、只下发命令），对面 3 名为 AI 对手。单人对战命令统一经 `dispatch(action,payload)`；非房主联机走 WebSocket（`main.js:449-450`）。**AI 的移动不依赖 `lib/grid.js`**：`lib/grid.js` 的 SPFA 流场寻路（`Grid.waypoints`）未被本仓库调用，单位移动由 `match-engine.mjs` 的 `moveUnitToward` 直接计算（详见「复用的框架件」一节）。
 
 ## 选人页可配置项
 
@@ -38,8 +38,8 @@ python serve.py            # 默认 0.0.0.0:8100
 
 | 项目 | 来源 |
 |---|---|
-| 场地布局 **13 列 × 9 行**（col0 = 盟友门列 / col12 = 敌方门列 / row0,row8 = 界外；内区 11×7 = `tile_football`） | `data/level_act1multi_football.json`（`mapData.map` 实测） |
-| 一局 **300 秒**、**移动倍率 0.5**、初始费用 30、费用增速 0.85、`characterLimit: 4`、`maxCost: 99`、`costIncreaseTime: 0.85`、`initialCost: 30`、`maxPlayTime: 300.0` | 同文件 `options` |
+| 场地布局 **13 列 × 9 行**（col0 = 盟友门列 / col12 = 敌方门列 / row0,row8 = 界外；内区 11×7 = `tile_football`） | 官方促融共竞关卡布局；本仓库由 `main.js:383-391` 程序化复刻该网格（`canUseGridCell` 限定 `x` 1..11、`y` 1..7） |
+| 一局 **300 秒**、初始费用 30、费用增速 0.85、`maxCost: 99` | 官方关卡配置；数值落在 `lib/football/match-engine.mjs` 的 `MATCH_STAGES` 与 `lib/football-rules.mjs` |
 | 足球规则（10 种足球的推动伤害阈值、攻击/摩擦/弹性/推力、特殊球效果、守门位、阵地屏障、净胜球印章） | PRTS 促融共竞条目；参数集中在 `lib/football-rules.mjs` |
 | 视觉（**非绿茵场**：灰白水泥大板 + 青色发光边线 + 左蓝右红钢桁架球门 + 深色看台） | 官方预览图 `multi_v3_01-football_preview` 像素实测 |
 
@@ -47,11 +47,11 @@ python serve.py            # 默认 0.0.0.0:8100
 
 | 文件 | 用途 | 说明 |
 |---|---|---|
-| `lib/projection.js` | **官方相机模型**（`officialCamera` / `pickTile` / `syncThreeCamera` + 13 个官方相机预设） | 文件仍在仓库中，提供官方相机模型与 `pickTile`；但**当前入口 `main.js` 并未引用它**——`main.js:53-55` 自建 `PerspectiveCamera`，`main.js:372` 使用本地函数 `pickTile`。它作为框架参考保留，不是运行期依赖。 |
-| `lib/grid.js` | **官方 SPFA 流场寻路**（`Grid.waypoints`）—— AI 的移动内核 | `main.js:2` 确实 import `Grid`，`main.js:390` 建立 `sceneGrid`；流场被 AI 移动使用。 |
+| `lib/projection.js` | 官方相机模型参考件（`officialCamera` / `pickTile` / `syncThreeCamera` + 13 个官方相机预设）。**当前入口 `main.js` 未引用它**——`main.js:53-55` 自建 `PerspectiveCamera`，拾取用本地函数 `pickTile`。作为框架参考保留，不是运行期依赖。 |
+| `lib/grid.js` | 被 `main.js` 借用 `Grid` 类做 13×9 场地的合法格与可通行判定（`main.js:2` import、`main.js:383-391` 建立 `sceneGrid`、`main.js:392-394` `canUseGridCell`）。文件内的 SPFA 流场寻路（`Grid.waypoints`）**未被本仓库调用**；当前单位移动由 `match-engine.mjs` 的 `moveUnitToward` 直接计算。 |
 | `lib/sim-constants.js`、`lib/shared-constants.js`、`lib/detmath.js` | 上者的依赖闭包（`GEO` / `hypot` 等） | 改了两处 import 路径，并把 `N_` 就地换成恒等函数 |
 
-玩家操作改为「点待部署区干员 → 点球合法格部署」的部署式控制；切换控制对象支持点场上干员 / `Tab` / 按钮三种方式。AI 仍沿用 Stronghold 的流场航路点、逐段推进、每步校验可通行与网格版本失效后重规划。足球规则拆成纯函数模块 `lib/football-rules.mjs`，可独立测试；镜头和 Grid 只作为框架参考，不把 Stronghold 的自动战斗循环伪装成足球玩法。
+玩家操作改为「点待部署区干员 → 点球合法格部署」的部署式控制；切换控制对象支持点场上干员 / `Tab` / 按钮三种方式。己方单位在战斗中的移动由引擎 `match-engine.mjs` 的 `moveUnitToward` 直接计算（球在射程外时朝球推进，守门员驻守球门列，位置夹在球场内区），**不使用** `lib/grid.js` 的流场航路点。足球规则拆成纯函数模块 `lib/football-rules.mjs`，可独立测试；镜头和 Grid 只作为框架参考，不把 Stronghold 的自动战斗循环伪装成足球玩法。
 
 ## 自建的部分（官方素材里没有）
 
@@ -88,11 +88,10 @@ python server/room-server.py        # 先在本机启动中继，默认 127.0.0.
 |---|---|
 | `tools/test-football-rules.mjs` | 10 |
 | `tools/test-match-engine.mjs` | 11 |
-| `tools/test-ai-teammates.mjs` | 9 |
-| `tools/test-match-state.mjs` | 6 |
+| `tools/test-ai-teammates.mjs` | 11 |
 | `tools/test_room_server.py` | 5 |
 
-CI 由 `.github/workflows/verify-football.yml` 执行，步骤包括：浏览器模块（`main.js`）语法检查、引擎（`lib/football/match-engine.mjs`）语法检查、上述 5 个测试文件、安装房间中继依赖、校验可分发回退素材（`python tools/check-assets.py`）、Python 工具语法校验（`python -m compileall -q server tools`）。
+CI 由 `.github/workflows/verify-football.yml` 执行，步骤包括：浏览器模块（`main.js`）语法检查、引擎（`lib/football/match-engine.mjs`）语法检查、上述 4 个测试文件、安装房间中继依赖、校验可分发回退素材（`python tools/check-assets.py`）、Python 工具语法校验（`python -m compileall -q server tools`）。
 
 触发条件：`push` 到 `main` / `fix/**` / `feat/**`，以及对 `main` 的 `pull_request`（`opened` / `synchronized` / `reopened` / `ready_for_review`）。具体某次 run 是否通过以 GitHub Actions 页面为准，本说明不代替 CI 结果。
 
@@ -117,7 +116,7 @@ CI 由 `.github/workflows/verify-football.yml` 执行，步骤包括：浏览器
 
 ## 许可
 
-代码 MIT（见 `LICENSE`）。官方素材与 `data/level_act1multi_football.json` 不在 MIT 覆盖范围内。
+代码 MIT（见 `LICENSE`）。官方素材不在 MIT 覆盖范围内。
 
 ## 规则边界与验证
 

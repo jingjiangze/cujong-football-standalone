@@ -2,9 +2,9 @@ import * as T from 'three';
 import { Grid } from './lib/grid.js';
 import { getBallProfile, getPushThreshold } from './lib/football-rules.mjs';
 import {
-  MATCH_STAGES, MATCH_RULESETS, MATCH_STYLES, CARRIED_ITEMS, OPPONENT_TEAMS, createMatchState, deployOperator, deployCarriedItem,
-  withdrawOperator, activateSkill, activateCarriedItem, startBattle, tickMatch,
-  restartBall, chooseOpponentTeam, markCell, votePause, voteSpeed, voteReady, requestCost, respondCostRequest, computeMatchSummary,
+  MATCH_STAGES, MATCH_STYLES, CARRIED_ITEMS, OPPONENT_TEAMS, createMatchState, deployOperator, deployCarriedItem,
+  withdrawOperator, activateSkill, activateCarriedItem, tickMatch,
+  restartBall, chooseOpponentTeam, votePause, voteSpeed, voteReady, requestCost, respondCostRequest,
 } from './lib/football/match-engine.mjs';
 import { decideAiTeammateCommands, pickNextControllableUnit } from './lib/football/ai-teammates.mjs';
 
@@ -67,7 +67,6 @@ const staticScene = new T.Group(); scene.add(staticScene);
 const dynamicScene = new T.Group(); scene.add(dynamicScene);
 let ballMesh = null, ballArrow = null, barrierMeshes = new Map(), unitMeshes = new Map(), carriedItemMeshes = new Map();
 let boardGrid = null;
-let officialGroundLoaded = false;
 
 function box(parent,w,h,d,color,x,y,z,materialOptions={}) {
   const mesh = new T.Mesh(new T.BoxGeometry(w,h,d),new T.MeshStandardMaterial({
@@ -192,7 +191,6 @@ function addLocalOfficialGroundTexture() {
     texture.colorSpace=T.SRGBColorSpace;texture.wrapS=texture.wrapT=T.RepeatWrapping;
     texture.repeat.set(1,1);
     for(const material of tileTopMaterials){material.map=texture;material.color.set(0xffffff);material.needsUpdate=true;}
-    officialGroundLoaded=true;
     toast('已加载本机客户端地面贴图。');
   }).catch(()=>{ /* The public original scene remains the fallback. */ });
 }
@@ -434,7 +432,6 @@ function applyCommand(ownerId,action,payload={}) {
     case 'respondCost': result=respondCostRequest(stateUi.match,ownerId,payload.accept===true);stateUi.match=result.state;break;
     case 'ready': stateUi.match=voteReady(stateUi.match,ownerId,payload.ready!==false);result={ok:true};break;
     case 'restart': result=restartBall(stateUi.match,ownerId,payload.x??(ownerId===0?1.4:11.6),payload.y??4.5);stateUi.match=result.state;break;
-    case 'mark': stateUi.match=markCell(stateUi.match,ownerId,payload.x,payload.y);result={ok:true};break;
     case 'pause': stateUi.match=votePause(stateUi.match,ownerId,payload.paused);result={ok:true};break;
     case 'speed': stateUi.match=voteSpeed(stateUi.match,ownerId,payload.fast);result={ok:true};break;
     default: result={ok:false,reason:'unknown-action'};

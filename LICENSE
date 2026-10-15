@@ -31,6 +31,3 @@ This MIT license covers only the source code authored for this project.
   are NOT covered by this license.
 - `vendor/` contains third-party libraries under their own licenses:
   pixi.js (MIT), pixi-spine (MIT), three.js (MIT).
-- `data/level_act1multi_football.json` is a stage-layout data file mirrored from
-  the public community data mirror `Kengxxiao/ArknightsGameData`. It is game
-  data (c) Hypergryph / Yostar, included here for study/interoperability only.
